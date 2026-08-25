@@ -188,6 +188,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewMiu(*miuOption)
+	case "oppa":
+		oppaOption := &outbound.OppaOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, oppaOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewOppa(*oppaOption)
 	case "sudoku":
 		sudokuOption := &outbound.SudokuOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, sudokuOption)

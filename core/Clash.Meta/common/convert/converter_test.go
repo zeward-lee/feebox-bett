@@ -472,3 +472,45 @@ func TestConvertsV2RayX365(t *testing.T) {
 		assert.NoError(t, err)
 	}
 }
+
+func TestConvertsV2RayMiu(t *testing.T) {
+	const publicKey = "XZ9SelKdde-iyimKHszSAQjZT7hSERAaYelnfBQnXVA"
+	const psk = "JIR0l8S9COCglFu5IhvaXNhb"
+	const pin = "28541cb07c83a8327751fb2f05df6e0c21e6be6daf0a0f6a2d43c350b923a248"
+	links := "miu://" + psk + "@example.com:46468/?sni=us-a.2ha.me&udp=1#miu-tls\n" +
+		"miu://" + psk + "@example.com:44580/?fp=chrome&pbk=" + publicKey + "&security=reality&sni=gateway.icloud.com&udp=1#miu-reality\n" +
+		"miu://" + psk + "@example.com:46468/?sni=us-a.2ha.me&udp=1&tls-fingerprint=" + pin + "\n"
+
+	proxies, err := ConvertsV2Ray([]byte(base64.StdEncoding.EncodeToString([]byte(links))))
+	assert.Nil(t, err)
+	assert.Len(t, proxies, 3)
+
+	assert.Equal(t, map[string]any{
+		"name":             "miu-tls",
+		"type":             "miu",
+		"server":           "example.com",
+		"port":             "46468",
+		"psk":              psk,
+		"udp":              true,
+		"tls":              true,
+		"network":          "tcp",
+		"skip-cert-verify": false,
+		"sni":              "us-a.2ha.me",
+	}, proxies[0])
+
+	assert.Equal(t, "miu-reality", proxies[1]["name"])
+	assert.Equal(t, "chrome", proxies[1]["client-fingerprint"])
+	assert.Equal(t, map[string]any{
+		"public-key": publicKey,
+		"short-id":   "",
+	}, proxies[1]["reality-opts"])
+
+	assert.Equal(t, "example.com:46468", proxies[2]["name"])
+	assert.Equal(t, pin, proxies[2]["tls-fingerprint"])
+	assert.Equal(t, pin, proxies[2]["fingerprint"])
+
+	for _, proxy := range proxies {
+		_, err = adapter.ParseProxy(proxy)
+		assert.NoError(t, err)
+	}
+}

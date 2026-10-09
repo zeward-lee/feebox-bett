@@ -718,6 +718,65 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 
 			proxies = append(proxies, x365)
 
+		case "miu":
+			// https://github.com/MiuProtocol/Miu
+			link, err := url.Parse(line)
+			if err != nil {
+				continue
+			}
+			server := link.Hostname()
+			if server == "" {
+				continue
+			}
+			portStr := link.Port()
+			if portStr == "" {
+				continue
+			}
+			query := link.Query()
+
+			remarks := link.Fragment
+			if remarks == "" {
+				remarks = fmt.Sprintf("%s:%s", server, portStr)
+			}
+			miu := make(map[string]any, 12)
+			miu["name"] = uniqueName(names, remarks)
+			miu["type"] = "miu"
+			miu["server"] = server
+			miu["port"] = portStr
+			miu["psk"] = link.User.Username()
+			udp := query.Get("udp")
+			miu["udp"] = udp == "1" || udp == "true"
+			miu["tls"] = true
+			miu["network"] = "tcp"
+			miu["skip-cert-verify"] = query.Get("insecure") == "1" || query.Get("allowInsecure") == "1"
+			if sni := query.Get("sni"); sni != "" {
+				miu["sni"] = sni
+			}
+			if fp := query.Get("fp"); fp != "" {
+				miu["client-fingerprint"] = fp
+			}
+			if publicKey := query.Get("pbk"); publicKey != "" {
+				miu["reality-opts"] = map[string]any{
+					"public-key": publicKey,
+					"short-id":   query.Get("sid"),
+				}
+			}
+			// The server certificate's SHA-256 fingerprint (hex). Written under both names: the
+			// share link format uses tls-fingerprint, mihomo reads fingerprint.
+			pin := query.Get("tls-fingerprint")
+			if pin == "" {
+				pin = query.Get("fingerprint")
+			}
+			if pin == "" {
+				pin = query.Get("pin")
+			}
+			if pin != "" {
+				miu["tls-fingerprint"] = pin
+				miu["fingerprint"] = pin
+			}
+
+			proxies = append(proxies, miu)
+
 		case "mierus":
 			urlMieru, err := url.Parse(line)
 			if err != nil {

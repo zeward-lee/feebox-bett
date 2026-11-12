@@ -57,6 +57,7 @@ const (
 	GostRelay
 	X365
 	Miu
+	Ninja
 )
 
 const (
@@ -249,6 +250,8 @@ func (at AdapterType) String() string {
 		return "X365"
 	case Miu:
 		return "Miu"
+	case Ninja:
+		return "Ninja"
 	case Relay:
 		return "Relay"
 	case Selector:

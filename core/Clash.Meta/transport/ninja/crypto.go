@@ -84,12 +84,12 @@ func (m Method) tokenKey(psk, salt []byte) ([]byte, error) {
 // The token is written in clear text but is only reproducible by a peer that
 // knows the passphrase, so the responder can authenticate the initiator before
 // any payload is accepted.
-func (m Method) buildToken(psk, salt []byte) ([]byte, error) {
+func (m Method) buildToken(psk, tokenPSK, salt []byte) ([]byte, error) {
 	if len(psk) != 16 && len(psk) != 24 && len(psk) != 32 {
 		return nil, fmt.Errorf("ninja: bad psk length %d", len(psk))
 	}
 	sum := blake3.Sum512(psk)
-	tk, err := m.tokenKey(psk, salt)
+	tk, err := m.tokenKey(tokenPSK, salt)
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +103,8 @@ func (m Method) buildToken(psk, salt []byte) ([]byte, error) {
 }
 
 // verifyToken re-computes the expected token and compares in constant time.
-func (m Method) verifyToken(psk, salt, got []byte) bool {
-	want, err := m.buildToken(psk, salt)
+func (m Method) verifyToken(psk, tokenPSK, salt, got []byte) bool {
+	want, err := m.buildToken(psk, tokenPSK, salt)
 	if err != nil {
 		return false
 	}

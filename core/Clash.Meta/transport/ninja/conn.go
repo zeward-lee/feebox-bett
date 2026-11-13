@@ -96,13 +96,17 @@ func (p PaddingConfig) PaddingLen(n int) int {
 type Config struct {
 	Method   Method
 	Password string
-	Padding  PaddingConfig
+	// NodePassword only feeds the token wrapping key; the AEAD sub key comes
+	// from Password. When empty it falls back to Password.
+	NodePassword string
+	Padding      PaddingConfig
 }
 
 // state holds the derived key material of one direction of one connection.
 type state struct {
 	cfg    *Config
 	psk    []byte
+	tokenPSK []byte
 	salt   []byte
 	aead   cipher.AEAD
 	nonce  []byte
@@ -118,7 +122,15 @@ func newState(cfg *Config, role byte) (*state, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &state{cfg: cfg, psk: psk, role: role}, nil
+	tokenPass := cfg.NodePassword
+	if tokenPass == "" {
+		tokenPass = cfg.Password
+	}
+	tokenPSK, err := cfg.Method.psk(tokenPass)
+	if err != nil {
+		return nil, err
+	}
+	return &state{cfg: cfg, psk: psk, tokenPSK: tokenPSK, role: role}, nil
 }
 
 // init generates a salt and derives the AEAD for it.
@@ -138,7 +150,7 @@ func (s *state) init() error {
 	}
 	s.aead = aead
 	s.nonce = make([]byte, aead.NonceSize())
-	banner, err := s.cfg.Method.buildToken(s.psk, salt)
+	banner, err := s.cfg.Method.buildToken(s.psk, s.tokenPSK, salt)
 	if err != nil {
 		return err
 	}
@@ -448,7 +460,7 @@ func (c *Conn) readHeader() error {
 		return err
 	}
 	token := first[:tokenLen]
-	if !c.cfg.Method.verifyToken(c.st.psk, salt, token) {
+	if !c.cfg.Method.verifyToken(c.st.psk, c.st.tokenPSK, salt, token) {
 		return fmt.Errorf("ninja: bad peer token")
 	}
 	meta, err := c.st.open(nil, first[tokenLen:])

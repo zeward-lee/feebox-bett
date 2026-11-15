@@ -1113,7 +1113,7 @@ proxies: # socks5
     type: x365
     server: server
     port: 443
-    uuid: uuid
+    uuid: uuid # 兼容公开 vless 变体的写法：uuid 带 #x365 后缀会被自动剥离（不区分大小写）
     # alpn: [h2] # 默认使用h2，如果开启http1.1模式需要设置alpn: [http/1.1]
     servername: xxx.com # REALITY servername
     client-fingerprint: chrome

@@ -88,6 +88,11 @@ func parseX365Addr(metadata *C.Metadata) *x365.DstAddr {
 }
 
 func NewX365(option X365Option) (*X365, error) {
+	// Subscriptions written for the public `type: vless` flavour carry the
+	// protocol marker in the uuid (`uuid: <uuid>#x365`) instead of switching
+	// the type. Strip it here as well as in x365.NewClient so the VLESS stack
+	// built below and the X365 request header share one clean UUID.
+	option.UUID = x365.TrimUUIDSuffix(option.UUID)
 	switch option.XHTTPOpts.Mode {
 	case "", "auto":
 		option.XHTTPOpts.Mode = "stream-one"

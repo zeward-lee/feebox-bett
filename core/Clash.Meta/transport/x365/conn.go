@@ -100,6 +100,16 @@ func (c *Conn) sendRequest(p []byte) error {
 }
 
 // recvResponse consumes the response header: magic(4) | status(1)
+//
+// The magic is the part both public implementations check (the vless variant in
+// Clash.Meta-custom / mihomo reads all five bytes and only compares the magic).
+// We keep rejecting a non-zero status byte on purpose: it turns a silent,
+// half-open tunnel into an error the log can show. The wire evidence is that the
+// status semantics are still unverified - no captured server response exists,
+// and the vless variant has a test that feeds 0x7f -, so a real node replying
+// anything but 0x00 would be reported as rejected here. If that ever happens
+// against a live node, relaxing this branch to log the byte and continue is the
+// whole fix; do not widen it without a captured response as proof.
 func (c *Conn) recvResponse() error {
 	var buffer [len(Magic) + 1]byte
 	if _, err := io.ReadFull(c.ExtendedConn, buffer[:]); err != nil {

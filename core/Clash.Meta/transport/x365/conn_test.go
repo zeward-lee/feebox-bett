@@ -54,6 +54,46 @@ func TestRequestHeader(t *testing.T) {
 	}
 }
 
+func TestRequestHeaderWithUUIDSuffix(t *testing.T) {
+	// flclash-private configs may keep the `#x365` marker on a `type: x365`
+	// uuid; the header must still carry the bare 16-byte UUID.
+	id := uuid.FromStringOrNil(testUUID)
+	dst := &DstAddr{AddrType: AtypIPv4, Addr: []byte{1, 2, 3, 4}, Port: 443}
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	conn := NewClient(testUUID + "#x365").StreamConn(client, dst)
+	go func() {
+		_, _ = conn.Write([]byte("hello"))
+	}()
+
+	want := append([]byte("X365"), 0x01, 0x01)
+	want = append(want, id.Bytes()...)
+	want = append(want, 0x01, 0xbb) // port 443
+	want = append(want, AtypIPv4, 1, 2, 3, 4)
+	want = append(want, "hello"...)
+
+	got := make([]byte, len(want))
+	_, err := io.ReadFull(server, got)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestClientTrimsUUIDSuffix(t *testing.T) {
+	plain := NewClient(testUUID)
+	for _, variant := range []string{
+		testUUID + "#x365",
+		testUUID + "#X365",
+		testUUID + "#x365 ",
+		"  " + testUUID + "#x365",
+	} {
+		assert.Equal(t, plain.uuid, NewClient(variant).uuid, "uuid %q", variant)
+	}
+	assert.Equal(t, testUUID, TrimUUIDSuffix(" "+testUUID+"#x365 "))
+	assert.Equal(t, testUUID, TrimUUIDSuffix(testUUID))
+}
+
 func TestResponse(t *testing.T) {
 	tests := []struct {
 		name     string

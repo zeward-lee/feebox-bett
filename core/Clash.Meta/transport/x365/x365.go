@@ -2,6 +2,7 @@ package x365
 
 import (
 	"net"
+	"strings"
 
 	"github.com/metacubex/mihomo/common/utils"
 
@@ -47,9 +48,27 @@ func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) net.Conn {
 	return newConn(conn, c, dst)
 }
 
+// uuidSuffix is the marker subscriptions built for the public `type: vless`
+// flavour append to the uuid instead of switching the type to `x365`. The
+// flclash-private configs carry the same suffix on `type: x365` nodes, so the
+// adapter and this client both drop it before parsing.
+const uuidSuffix = "#x365"
+
+// TrimUUIDSuffix removes a trailing `#x365` marker from a uuid so the value
+// parses as a plain UUID. The match is case-insensitive and surrounding
+// whitespace is ignored, matching mihomo's `parseVlessUUIDMode`. A uuid without
+// the marker is returned unchanged.
+func TrimUUIDSuffix(uuidStr string) string {
+	trimmed := strings.TrimSpace(uuidStr)
+	if len(trimmed) >= len(uuidSuffix) && strings.EqualFold(trimmed[len(trimmed)-len(uuidSuffix):], uuidSuffix) {
+		return strings.TrimSpace(trimmed[:len(trimmed)-len(uuidSuffix)])
+	}
+	return trimmed
+}
+
 // NewClient return Client instance
 func NewClient(uuidStr string) *Client {
 	return &Client{
-		uuid: utils.UUIDMap(uuidStr),
+		uuid: utils.UUIDMap(TrimUUIDSuffix(uuidStr)),
 	}
 }

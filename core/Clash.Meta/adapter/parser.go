@@ -25,6 +25,10 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	var (
 		proxy outbound.ProxyAdapter
 		err   error
+		// forcedFastupMux records that the Fastup variant already wrapped the
+		// trojan proxy in sing-mux, so a user `smux:` block must not wrap it a
+		// second time.
+		forcedFastupMux bool
 	)
 	switch proxyType {
 	case "ss":
@@ -83,6 +87,15 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewTrojan(*trojanOption)
+		// Fastup nodes must run inside an h2mux session; the adapter forces
+		// sing-mux with the protocol the vendor client uses.
+		if err == nil && outbound.IsFastupTrojanPassword(trojanOption.Password) {
+			proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
+				Enabled:  true,
+				Protocol: "h2mux",
+			}, proxy)
+			forcedFastupMux = err == nil
+		}
 	case "hysteria":
 		hyOption := &outbound.HysteriaOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, hyOption)
@@ -259,7 +272,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		return nil, err
 	}
 
-	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist {
+	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist && !forcedFastupMux {
 		muxOption := &outbound.SingMuxOption{}
 		err = decoder.Decode(muxMapping, muxOption)
 		if err != nil {

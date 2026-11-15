@@ -2,6 +2,8 @@ package outbound
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -48,6 +50,7 @@ type TrojanOption struct {
 	Server            string           `proxy:"server"`
 	Port              int              `proxy:"port"`
 	Password          string           `proxy:"password"`
+	Mpw               string           `proxy:"mpw,omitempty"`
 	ALPN              []string         `proxy:"alpn,omitempty"`
 	SNI               string           `proxy:"sni,omitempty"`
 	SkipCertVerify    bool             `proxy:"skip-cert-verify,omitempty"`
@@ -73,6 +76,38 @@ type TrojanSSOption struct {
 	Enabled  bool   `proxy:"enabled,omitempty"`
 	Method   string `proxy:"method,omitempty"`
 	Password string `proxy:"password,omitempty"`
+}
+
+// Fastup is a trojan variant used by the same private subscriptions that carry
+// x365 nodes: the password ends in "#fastup" and the server expects
+// md5(password + mpw) instead of the literal string. The marker sits in the
+// password and not in the type, so the plain `trojan` parser stays valid.
+const fastupPasswordSuffix = "#fastup"
+
+// defaultFastupMpw is what the vendor client falls back to when a node does not
+// carry its own `mpw` (the upstream implementation spells it out as a byte
+// slice; the value is the same).
+const defaultFastupMpw = "nya20241209"
+
+// IsFastupTrojanPassword reports whether the password asks for the Fastup
+// derivation. The marker must be the whole suffix: "a#fastup-x" is untouched.
+func IsFastupTrojanPassword(password string) bool {
+	return strings.HasSuffix(password, fastupPasswordSuffix)
+}
+
+// deriveTrojanPassword returns the password the trojan handshake actually uses
+// and whether the Fastup marker was found. Anything without the exact suffix is
+// returned unchanged, with or without mpw.
+func deriveTrojanPassword(password string, mpw string) (string, bool) {
+	if !IsFastupTrojanPassword(password) {
+		return password, false
+	}
+	password = strings.TrimSuffix(password, fastupPasswordSuffix)
+	if mpw == "" {
+		mpw = defaultFastupMpw
+	}
+	digest := md5.Sum([]byte(password + mpw))
+	return hex.EncodeToString(digest[:]), true
 }
 
 func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ net.Conn, err error) {
@@ -281,6 +316,7 @@ func (t *Trojan) Close() error {
 }
 
 func NewTrojan(option TrojanOption) (*Trojan, error) {
+	option.Password, _ = deriveTrojanPassword(option.Password, option.Mpw)
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 
 	if option.SNI == "" {

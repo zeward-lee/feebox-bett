@@ -67,6 +67,24 @@ func (c *Conn) WriteBuffer(buffer *buf.Buffer) error {
 	return c.ExtendedConn.WriteBuffer(buffer)
 }
 
+// writeRequestHeader appends the x365 request header:
+// magic(4) | version(1) | command(1) | uuid(16) | port(2) | atyp(1) | addr
+//
+// TCP and UDP requests share it; only the command byte differs (0x01 vs 0x02).
+func writeRequestHeader(buffer *buf.Buffer, command byte, id uuid.UUID, dst *DstAddr) {
+	buf.Must(
+		buf.Error(buffer.Write(Magic[:])),
+		buffer.WriteByte(Version),
+		buffer.WriteByte(command),
+		buf.Error(buffer.Write(id.Bytes())),
+	)
+	binary.BigEndian.PutUint16(buffer.Extend(2), dst.Port)
+	buf.Must(
+		buffer.WriteByte(dst.AddrType),
+		buf.Error(buffer.Write(dst.Addr)),
+	)
+}
+
 // sendRequest writes the request header followed by the first payload:
 // magic(4) | version(1) | command(1) | uuid(16) | port(2) | atyp(1) | addr
 func (c *Conn) sendRequest(p []byte) error {
@@ -82,24 +100,18 @@ func (c *Conn) sendRequest(p []byte) error {
 	buffer := buf.NewSize(requestLen)
 	defer buffer.Release()
 
-	buf.Must(
-		buf.Error(buffer.Write(Magic[:])),
-		buffer.WriteByte(Version),
-		buffer.WriteByte(CommandTCP),
-		buf.Error(buffer.Write(c.id.Bytes())),
-	)
-	binary.BigEndian.PutUint16(buffer.Extend(2), c.dst.Port)
-	buf.Must(
-		buffer.WriteByte(c.dst.AddrType),
-		buf.Error(buffer.Write(c.dst.Addr)),
-		buf.Error(buffer.Write(p)),
-	)
+	writeRequestHeader(buffer, CommandTCP, c.id, c.dst)
+	buf.Must(buf.Error(buffer.Write(p)))
 
 	_, err := c.ExtendedConn.Write(buffer.Bytes())
 	return err
 }
 
-// recvResponse consumes the response header: magic(4) | status(1)
+func (c *Conn) recvResponse() error {
+	return readResponse(c.ExtendedConn)
+}
+
+// readResponse consumes the response header: magic(4) | status(1)
 //
 // The magic is the part both public implementations check (the vless variant in
 // Clash.Meta-custom / mihomo reads all five bytes and only compares the magic).
@@ -110,9 +122,9 @@ func (c *Conn) sendRequest(p []byte) error {
 // anything but 0x00 would be reported as rejected here. If that ever happens
 // against a live node, relaxing this branch to log the byte and continue is the
 // whole fix; do not widen it without a captured response as proof.
-func (c *Conn) recvResponse() error {
+func readResponse(r io.Reader) error {
 	var buffer [len(Magic) + 1]byte
-	if _, err := io.ReadFull(c.ExtendedConn, buffer[:]); err != nil {
+	if _, err := io.ReadFull(r, buffer[:]); err != nil {
 		return err
 	}
 

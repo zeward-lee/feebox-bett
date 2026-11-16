@@ -26,8 +26,21 @@ func TestNewX365Defaults(t *testing.T) {
 
 		assert.Equal(t, x365.UserAgent, proxy.option.XHTTPOpts.Headers["User-Agent"])
 		assert.Equal(t, "stream-one", proxy.option.XHTTPOpts.Mode)
+		// `udp` is opt-in, matching the flclash-private nodes that set
+		// `udp: false`; UOT is reported like the private core does.
 		assert.False(t, proxy.SupportUDP())
-		assert.False(t, proxy.SupportUOT())
+		assert.True(t, proxy.SupportUOT())
+	})
+
+	t.Run("udp", func(t *testing.T) {
+		custom := option
+		custom.UDP = true
+		proxy, err := NewX365(custom)
+		require.NoError(t, err)
+		defer proxy.Close()
+
+		assert.True(t, proxy.SupportUDP())
+		assert.True(t, proxy.SupportUOT())
 	})
 
 	t.Run("custom user agent", func(t *testing.T) {

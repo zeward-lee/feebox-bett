@@ -6,13 +6,14 @@ import (
 	"net"
 	"strings"
 
+	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/x365"
 )
 
 // X365 carries the X365 request header over the same REALITY + xhttp
 // stack as VLESS, so it reuses the VLESS transport and only replaces the
-// protocol layer. It is TCP only.
+// protocol layer.
 type X365 struct {
 	*Vless
 	client *x365.Client
@@ -24,6 +25,7 @@ type X365Option struct {
 	Server            string         `proxy:"server"`
 	Port              int            `proxy:"port"`
 	UUID              string         `proxy:"uuid"`
+	UDP               bool           `proxy:"udp,omitempty"`
 	ALPN              []string       `proxy:"alpn,omitempty"`
 	ServerName        string         `proxy:"servername,omitempty"`
 	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
@@ -54,13 +56,38 @@ func (x *X365) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn,
 }
 
 // ListenPacketContext implements C.ProxyAdapter
-func (x *X365) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
-	return x.Base.ListenPacketContext(ctx, metadata)
+//
+// UDP keeps the VLESS/xhttp transport but replaces the TCP header with one
+// x365 UDP request frame per datagram (command 0x02, see transport/x365
+// PacketConn). The public x365-core reference implementation documents the
+// command but has not implemented it; the flclash-private core has, and that
+// is the framing this adapter follows. The `udp` yaml key still gates it, so
+// subscriptions that set `udp: false` keep the proxy TCP only.
+func (x *X365) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	if err = x.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
+	}
+
+	c, err := x.dialContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s connect error: %s", x.addr, err.Error())
+	}
+	defer func(c net.Conn) {
+		safeConnClose(c, err)
+	}(c)
+
+	// x365 only allows xhttp mode stream-one, so dialContext already returns
+	// the REALITY + xhttp full-duplex stream; the xhttp client owns the TLS
+	// handshake and there is no extra TLS layer to add here.
+	return NewPacketConn(N.NewThreadSafePacketConn(x.client.PacketConn(c, parseX365UDPAddr(metadata))), x), nil
 }
 
 // SupportUOT implements C.ProxyAdapter
+//
+// The flclash-private core reports UOT support for x365; UDP datagrams travel
+// over the same TCP/TLS/xhttp stream either way.
 func (x *X365) SupportUOT() bool {
-	return false
+	return true
 }
 
 func parseX365Addr(metadata *C.Metadata) *x365.DstAddr {
@@ -85,6 +112,32 @@ func parseX365Addr(metadata *C.Metadata) *x365.DstAddr {
 		Addr:     addr,
 		Port:     metadata.DstPort,
 	}
+}
+
+// parseX365UDPAddr builds the per-datagram destination. ListenPacketContext has
+// already resolved the host, and the private core sends the resolved IP rather
+// than a domain, so prefer DstIP and only fall back to the domain when
+// resolution produced nothing.
+func parseX365UDPAddr(metadata *C.Metadata) *x365.DstAddr {
+	dst := &x365.DstAddr{Port: metadata.DstPort}
+	ip := metadata.DstIP
+	if ip.IsValid() {
+		ip = ip.Unmap()
+	}
+	switch {
+	case ip.Is4():
+		dst.AddrType = x365.AtypIPv4
+		dst.Addr = ip.AsSlice()
+	case ip.Is6():
+		dst.AddrType = x365.AtypIPv6
+		dst.Addr = ip.AsSlice()
+	default:
+		dst.AddrType = x365.AtypDomainName
+		dst.Addr = make([]byte, len(metadata.Host)+1)
+		dst.Addr[0] = byte(len(metadata.Host))
+		copy(dst.Addr[1:], metadata.Host)
+	}
+	return dst
 }
 
 func NewX365(option X365Option) (*X365, error) {
@@ -119,6 +172,7 @@ func NewX365(option X365Option) (*X365, error) {
 		Server:            option.Server,
 		Port:              option.Port,
 		UUID:              option.UUID,
+		UDP:               option.UDP,
 		TLS:               true,
 		ALPN:              option.ALPN,
 		Network:           "xhttp",
@@ -131,7 +185,8 @@ func NewX365(option X365Option) (*X365, error) {
 		return nil, err
 	}
 	v.tp = C.X365
-	v.udp = false
+	// XUDP is the Xray Mux.Cool wrapper; x365 has no such command, so keep it
+	// off. SupportUDP comes from the `udp` yaml key through NewBase.
 	v.xudp = false
 
 	return &X365{

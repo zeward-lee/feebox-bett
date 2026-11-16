@@ -16,6 +16,11 @@ const (
 	Version byte = 1
 
 	CommandTCP byte = 1
+	// CommandUDP is the x365 UDP command. The public x365-core reference
+	// implementation documents 0x02/0x03 as UDP commands but does not
+	// implement them yet; the flclash-private core ships a full PacketConn
+	// that uses 0x02, and that is the framing this package follows.
+	CommandUDP byte = 2
 
 	StatusOK byte = 0
 
@@ -46,6 +51,13 @@ type Client struct {
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) net.Conn {
 	return newConn(conn, c, dst)
+}
+
+// PacketConn returns a UDP-over-x365 PacketConn. Each datagram carries its own
+// x365 request header (command 0x02) so that one stream can address more than
+// one destination, matching the flclash-private core.
+func (c *Client) PacketConn(conn net.Conn, dst *DstAddr) *PacketConn {
+	return newPacketConn(conn, c, dst)
 }
 
 // uuidSuffix is the marker subscriptions built for the public `type: vless`

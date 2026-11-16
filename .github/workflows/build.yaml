@@ -3,7 +3,8 @@ name: build
 # Private feebox-bett line.
 # - No push trigger on purpose: branch pushes must never consume runners.
 # - Manual verification goes through workflow_dispatch, releases through v* tags.
-# - Android / macOS matrix entries removed, SignPath + keystore secrets are off.
+# - Android lane is enabled (arm64 apk, release-signed from the KEYSTORE secret);
+#   macOS entries removed, SignPath stays off.
 on:
   workflow_dispatch:
   push:
@@ -24,17 +25,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Android (probe: single arm64 lane while wiring up signing) ---
+          # --- Android: one lane only (arm64-v8a covers virtually every phone).
+          # To ship a fat apk as well, uncomment the universal entry; the same
+          # steps handle it (setup.dart builds android-arm,android-arm64,
+          # android-x64 into one apk, product name android-universal.apk).
           - platform: android
             os: ubuntu-24.04
             arch: arm64
-          # --- Desktop lanes (re-enabled once the android probe is green) ---
-          # - platform: windows
-          #   os: windows-2022
-          #   arch: amd64
-          # - platform: linux
-          #   os: ubuntu-22.04
-          #   arch: amd64
+          # - platform: android
+          #   os: ubuntu-24.04
+          #   arch: universal
+          # --- Desktops ---
+          - platform: windows
+            os: windows-2022
+            arch: amd64
+          - platform: linux
+            os: ubuntu-22.04
+            arch: amd64
 
     steps:
       - name: Checkout

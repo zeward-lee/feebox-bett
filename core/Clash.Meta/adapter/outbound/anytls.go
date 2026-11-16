@@ -12,9 +12,11 @@ import (
 	"github.com/metacubex/mihomo/component/proxydialer"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/anytls"
+	"github.com/metacubex/mihomo/transport/v2rayxhttp"
 	"github.com/metacubex/mihomo/transport/vmess"
 
 	M "github.com/metacubex/sing/common/metadata"
+	singN "github.com/metacubex/sing/common/network"
 	"github.com/metacubex/sing/common/uot"
 )
 
@@ -22,6 +24,9 @@ type AnyTLS struct {
 	*Base
 	client *anytls.Client
 	option *AnyTLSOption
+	// xhttp is set when the node carries a `transport: xhttp` block; the anytls
+	// client then dials XHTTP streams instead of plain TCP sockets.
+	xhttp *v2rayxhttp.Client
 }
 
 type AnyTLSOption struct {
@@ -48,6 +53,11 @@ type AnyTLSOption struct {
 	IdleSessionTimeout       int              `proxy:"idle-session-timeout,omitempty"`
 	MinIdleSession           int              `proxy:"min-idle-session,omitempty"`
 	DisableReuse             bool             `proxy:"disable-reuse,omitempty"`
+	// Transport selects a transport layer between the TCP socket and the anytls
+	// session. Only "xhttp" (the vendor `transport/v2rayxhttp`) is implemented;
+	// leaving it empty keeps the node a plain anytls-over-TLS outbound.
+	Transport string                `proxy:"transport,omitempty"`
+	XHTTPOpts XHTTPTransportOptions `proxy:"xhttp-opts,omitempty"`
 }
 
 func (t *AnyTLS) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -88,7 +98,11 @@ func (t *AnyTLS) ProxyInfo() C.ProxyInfo {
 
 // Close implements C.ProxyAdapter
 func (t *AnyTLS) Close() error {
-	return t.client.Close()
+	err := t.client.Close()
+	if t.xhttp != nil {
+		_ = t.xhttp.Close()
+	}
+	return err
 }
 
 // IsShanlianPassword reports whether the password carries the Shanlian marker.
@@ -128,11 +142,28 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	singDialer := proxydialer.NewSingDialer(outbound.dialer)
+	var sessionDialer singN.Dialer = singDialer
+	if option.Transport != "" {
+		// The vendor dedicated lines run anytls inside a `transport/v2rayxhttp`
+		// (XHTTP) stream pair instead of a plain TCP socket. Swap the dialer the
+		// anytls session uses; everything above it (TLS, session framing) stays
+		// byte-for-byte the same as a standard anytls node.
+		transport := strings.ToLower(strings.TrimSpace(option.Transport))
+		if transport != "xhttp" && transport != "v2rayxhttp" {
+			return nil, errors.New("anytls: unsupported transport: " + option.Transport)
+		}
+		xhttpClient, err := newXHTTPTransport(&option, singDialer)
+		if err != nil {
+			return nil, err
+		}
+		outbound.xhttp = xhttpClient
+		sessionDialer = v2rayxhttp.NewDialer(xhttpClient)
+	}
 
 	tOption := anytls.ClientConfig{
 		Password:                 option.Password,
 		Server:                   M.ParseSocksaddrHostPort(option.Server, uint16(option.Port)),
-		Dialer:                   singDialer,
+		Dialer:                   sessionDialer,
 		ClientMetadata:           option.ClientMetadata,
 		IdleSessionCheckInterval: time.Duration(option.IdleSessionCheckInterval) * time.Second,
 		IdleSessionTimeout:       time.Duration(option.IdleSessionTimeout) * time.Second,

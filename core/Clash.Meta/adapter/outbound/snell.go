@@ -209,8 +209,13 @@ func snellECHTLSConfig(obfsOption *snellECHTLSOption) (*ech.Config, error) {
 
 // requiresSnellV4Identity reports whether the obfs layer already binds the
 // session to the psk, which forces the v4 identity transport on.
-func requiresSnellV4Identity(obfsMode string, shadowTLSOption *shadowtls.ShadowTLSOption) bool {
-	return isSnellECHTLSMode(obfsMode) || shadowTLSOption != nil
+//
+// Only the OIX ech-tls front does: it is the enhancement path and its server
+// expects the identity header. A plain shadow-tls front is an upstream feature
+// and keeps the native handshake, so a stock snell server behind shadow-tls
+// still works.
+func requiresSnellV4Identity(obfsMode string) bool {
+	return isSnellECHTLSMode(obfsMode)
 }
 
 // snellStreamConn wraps c with the OIX identity header when the node asks for
@@ -542,16 +547,16 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	}
 
 	identity := option.Identity
-	if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOpt) {
+	if requiresSnellV4Identity(obfsOption.Mode) {
 		if option.IdentityConfigured && !option.Identity {
-			return nil, fmt.Errorf("snell %s identity cannot be disabled with ech-tls or shadow-tls", addr)
+			return nil, fmt.Errorf("snell %s identity cannot be disabled with ech-tls", addr)
 		}
 		identity = true
 	}
 
 	// backward compatible
 	if option.Version == 0 {
-		if requiresSnellV4Identity(obfsOption.Mode, shadowTLSOpt) {
+		if requiresSnellV4Identity(obfsOption.Mode) {
 			option.Version = snell.Version4
 		} else {
 			option.Version = snell.DefaultSnellVersion

@@ -149,3 +149,7 @@ require (
 
 // for https://github.com/golang/protobuf/issues/1704
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
+
+// Local fork: ViewTurbo (#VT) and blackstone (#BLACKSTONE) variants.
+// The shipped build is the `core` module, which carries the same replace.
+replace github.com/metacubex/sing-shadowsocks2 => ../sing-shadowsocks2

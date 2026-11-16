@@ -6,6 +6,12 @@ godebug default=go1.20
 
 replace github.com/metacubex/mihomo => ./Clash.Meta
 
+// sing-shadowsocks2 is a local fork: the ViewTurbo (#VT) and blackstone
+// (#BLACKSTONE) variants live in core/sing-shadowsocks2. A replace in the
+// dependency's go.mod is ignored, so it must be here, in the module that is
+// compiled into the shipped library.
+replace github.com/metacubex/sing-shadowsocks2 => ./sing-shadowsocks2
+
 require (
 	github.com/appshubcc/go-iperf3 v0.1.0
 	github.com/metacubex/mihomo v0.0.0-00010101000000-000000000000

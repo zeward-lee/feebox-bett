@@ -118,9 +118,38 @@ func TestParseFastupTypeAcceptsMarker(t *testing.T) {
 	}
 }
 
-func TestParseOldFormsKeepBaseIdentity(t *testing.T) {
+// The old spellings (`type: trojan` + password#fastup, `type: anytls` +
+// password#SL) keep working and now report the vendor identity, so a node
+// generated before the generator emitted `type: fastup` still shows FastUP.
+func TestParseMarkerFormsReportVendorIdentity(t *testing.T) {
+	trojanProxy, err := ParseProxy(map[string]any{
+		"name":     "Marker trojan fixture",
+		"type":     "trojan",
+		"server":   "node.example",
+		"port":     443,
+		"password": "synthetic-password#fastup",
+		"sni":      "www.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trojanProxy.Close()
+	if got := trojanProxy.Type(); got != C.Fastup {
+		t.Fatalf("marker trojan type = %v, want %v", got, C.Fastup)
+	}
+	if !trojanProxy.ProxyInfo().SMUX {
+		t.Fatal("marker trojan was not wrapped with sing-mux")
+	}
+	raw, err := trojanProxy.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"Fastup"`) {
+		t.Fatalf("API identity = %s, want the Fastup type", raw)
+	}
+
 	anytlsProxy, err := ParseProxy(map[string]any{
-		"name":     "Old anytls fixture",
+		"name":     "Marker anytls fixture",
 		"type":     "anytls",
 		"server":   "node.example",
 		"port":     443,
@@ -130,22 +159,51 @@ func TestParseOldFormsKeepBaseIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer anytlsProxy.Close()
+	if got := anytlsProxy.Type(); got != C.Shanlian {
+		t.Fatalf("marker anytls type = %v, want %v", got, C.Shanlian)
+	}
+	raw, err = anytlsProxy.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"Shanlian"`) {
+		t.Fatalf("API identity = %s, want the Shanlian type", raw)
+	}
+}
+
+// A node without the marker keeps the base protocol identity and is not forced
+// into sing-mux: only the Fastup marker means the variant.
+func TestParseUnmarkedNodesKeepBaseIdentity(t *testing.T) {
+	anytlsProxy, err := ParseProxy(map[string]any{
+		"name":     "Plain anytls fixture",
+		"type":     "anytls",
+		"server":   "node.example",
+		"port":     443,
+		"password": "ordinary-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anytlsProxy.Close()
 	if got := anytlsProxy.Type(); got != C.AnyTLS {
-		t.Fatalf("legacy anytls type = %v, want %v", got, C.AnyTLS)
+		t.Fatalf("plain anytls type = %v, want %v", got, C.AnyTLS)
 	}
 
 	trojanProxy, err := ParseProxy(map[string]any{
-		"name":     "Old trojan fixture",
+		"name":     "Plain trojan fixture",
 		"type":     "trojan",
 		"server":   "node.example",
 		"port":     443,
-		"password": "synthetic-password#fastup",
+		"password": "ordinary-password",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer trojanProxy.Close()
 	if got := trojanProxy.Type(); got != C.Trojan {
-		t.Fatalf("legacy trojan type = %v, want %v", got, C.Trojan)
+		t.Fatalf("plain trojan type = %v, want %v", got, C.Trojan)
+	}
+	if trojanProxy.ProxyInfo().SMUX {
+		t.Fatal("plain trojan was wrapped with sing-mux")
 	}
 }

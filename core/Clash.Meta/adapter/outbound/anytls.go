@@ -91,6 +91,13 @@ func (t *AnyTLS) Close() error {
 	return t.client.Close()
 }
 
+// IsShanlianPassword reports whether the password carries the Shanlian marker.
+// The parser uses it to give the old `type: anytls` spelling of a Shanlian node
+// the vendor identity, mirroring IsFastupTrojanPassword for the trojan wire.
+func IsShanlianPassword(password string) bool {
+	return anytls.IsShanlianPassword(password)
+}
+
 // EnsureShanlianPasswordMarker appends the "#sl" marker to a password that does
 // not carry it. Subscriptions that publish `type: shanlian` may omit the marker
 // because the type already implies the variant; the anytls client still keys

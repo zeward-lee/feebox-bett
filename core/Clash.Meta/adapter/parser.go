@@ -123,15 +123,25 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		if err != nil {
 			break
 		}
-		proxy, err = outbound.NewTrojan(*trojanOption)
-		// Fastup nodes must run inside an h2mux session; the adapter forces
-		// sing-mux with the protocol the vendor client uses.
-		if err == nil && outbound.IsFastupTrojanPassword(trojanOption.Password) {
+		var trojanAdapter *outbound.Trojan
+		trojanAdapter, err = outbound.NewTrojan(*trojanOption)
+		if err != nil {
+			break
+		}
+		// A bare `type: trojan` whose password carries the #fastup marker is the
+		// old spelling of the Fastup variant, so report the vendor identity and
+		// not Trojan: the UI maps it to FastUP. The node must also run inside an
+		// h2mux session; the adapter forces sing-mux with the protocol the
+		// vendor client uses.
+		if outbound.IsFastupTrojanPassword(trojanOption.Password) {
+			trojanAdapter.SetAdapterType(C.Fastup)
 			proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
 				Enabled:  true,
 				Protocol: "h2mux",
-			}, proxy)
+			}, trojanAdapter)
 			forcedFastupMux = err == nil
+		} else {
+			proxy = trojanAdapter
 		}
 	case "fastup":
 		// `type: fastup` is the vendor's own name for the trojan wire: the
@@ -252,7 +262,18 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		if err != nil {
 			break
 		}
-		proxy, err = outbound.NewAnyTLS(*anytlsOption)
+		var anytlsAdapter *outbound.AnyTLS
+		anytlsAdapter, err = outbound.NewAnyTLS(*anytlsOption)
+		if err != nil {
+			break
+		}
+		// A bare `type: anytls` whose password carries the Shanlian marker
+		// (#sl over the 64 hex key) is the old spelling of the Shanlian
+		// variant, so report the vendor identity: the UI maps it to 闪连.
+		if outbound.IsShanlianPassword(anytlsOption.Password) {
+			anytlsAdapter.SetAdapterType(C.Shanlian)
+		}
+		proxy = anytlsAdapter
 	case "shanlian":
 		// `type: shanlian` is the vendor's own name for the anytls wire with the
 		// Shanlian direct-authentication password. The "#sl" marker may be

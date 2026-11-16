@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"net"
@@ -20,6 +21,13 @@ import (
 //	once: IV(16 random bytes) || AES-CTR(key, IV)(0^4)   // "tag", 4 bytes
 //	then: AES-CTR(key, IV) continues over the payload, tag included in the
 //	      keystream offset, so the peer decrypts tag + payload with one stream.
+//
+// The key derivation is a bare SHA-256 truncated to 16 bytes, byte-for-byte
+// identical to the vendor core. Do NOT add a domain separator, prefix, salt or
+// HKDF step, and do not widen the truncation: the peer derives the key the same
+// way, so any change makes it reject the 4-byte tag with "obfs key mismatch"
+// and the node looks unreachable. TestObfsKeyDerivation pins the mapping for a
+// known obfs key to keep that contract from drifting.
 //
 // The receiver reads the 20-byte preamble, decrypts the 4-byte tag with the
 // CTR stream and requires it to be four zero bytes; anything else is reported
@@ -44,6 +52,8 @@ type obfsConn struct {
 }
 
 // newObfsConn wraps conn with the vendor obfs layer when obfsKey is not empty.
+// Config.Validate rejects a missing key, so an empty obfsKey only reaches here
+// when the node explicitly disabled obfs (`obfs-key: ""`).
 func newObfsConn(conn net.Conn, obfsKey string) net.Conn {
 	if obfsKey == "" {
 		return conn
@@ -59,6 +69,10 @@ func (c *obfsConn) Read(b []byte) (int, error) {
 	defer c.readMu.Unlock()
 	if c.readStream == nil {
 		if err := c.initRead(); err != nil {
+			// A bad preamble (or a short read) leaves the key stream unusable.
+			// Close the socket so neither half can keep using a conn that can
+			// never be decrypted instead of leaking it until a timeout.
+			_ = c.Conn.Close()
 			return 0, err
 		}
 	}
@@ -80,10 +94,12 @@ func (c *obfsConn) initRead() error {
 	}
 	var tag [obfsTagLength]byte
 	stream.XORKeyStream(tag[:], preamble[obfsIVLength:])
-	for _, v := range tag {
-		if v != 0 {
-			return errors.New(obfsKeyMismatch)
-		}
+	// Constant-time tag check: OR the four bytes together and compare once, so
+	// the tag check does not leak how many leading bytes matched (a timing
+	// oracle on a keyed preamble is a bad habit even on TCP).
+	diff := tag[0] | tag[1] | tag[2] | tag[3]
+	if subtle.ConstantTimeByteEq(diff, 0) != 1 {
+		return errors.New(obfsKeyMismatch)
 	}
 	c.readStream = stream
 	return nil

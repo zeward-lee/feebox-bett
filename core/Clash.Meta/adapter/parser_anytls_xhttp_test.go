@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strings"
 	"testing"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -77,4 +78,25 @@ func TestParseAnyTLSRejectsUnknownTransport(t *testing.T) {
 	if _, err := ParseProxy(node); err == nil {
 		t.Fatal("unknown transport should fail at parse time")
 	}
+}
+
+// TestParseAnyTLSXHTTPRequiresObfsKey pins the fail-closed contract on the yaml
+// surface: a dedicated line without `obfs-key` must be refused when the profile
+// is parsed, never silently dialed in cleartext. An explicit `obfs-key: ""` is
+// the documented opt-out and must still parse.
+func TestParseAnyTLSXHTTPRequiresObfsKey(t *testing.T) {
+	node := shanlianDedicatedNode()
+	opts := node["xhttp-opts"].(map[string]any)
+	delete(opts, "obfs-key")
+	if _, err := ParseProxy(node); err == nil || !strings.Contains(err.Error(), "obfs-key is required for v2rayxhttp transport") {
+		t.Fatalf("parse error = %v, want the obfs-key required error", err)
+	}
+
+	node = shanlianDedicatedNode()
+	node["xhttp-opts"].(map[string]any)["obfs-key"] = ""
+	proxy, err := ParseProxy(node)
+	if err != nil {
+		t.Fatalf("explicit obfs opt-out should parse: %v", err)
+	}
+	proxy.Close()
 }

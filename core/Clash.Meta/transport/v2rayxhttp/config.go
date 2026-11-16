@@ -1,3 +1,17 @@
+// Package v2rayxhttp implements the client half of the vendor
+// `transport/v2rayxhttp` (XHTTP) transport: a session id in the request path,
+// an upload stream with an endless body and, for `stream-up`, a separate
+// downstream stream that may live on another server/TLS identity.
+//
+// ALPN: the stream layer speaks HTTP/2 and defaults to ALPN "h2". A node may
+// override the protocol list (`alpn`); when the configured list cannot
+// negotiate h2 the endpoint falls back to an HTTP/1.1 client. HTTP/1.1 has no
+// stream multiplexing, so `xmux.max-concurrency` (streams per connection)
+// cannot bound concurrency - every in-flight stream needs its own TCP
+// connection - and `stream-one` loses its full-duplex guarantee. The dedicated
+// lines must stay on h2; the h1 path only exists so a node that explicitly asks
+// for `alpn: [http/1.1]` (e.g. behind a CDN that terminates h2 itself) still
+// connects.
 package v2rayxhttp
 
 import (
@@ -27,6 +41,11 @@ const (
 	maxPadding     = 1000
 )
 
+// ALPNH2 is the ALPN protocol of the HTTP/2 stream layer. The transport falls
+// back to it when the node does not configure `alpn`; adapters should use the
+// same constant so the default cannot drift.
+const ALPNH2 = "h2"
+
 // Range is an inclusive [From, To] interval. The vendor config writes single
 // numbers ("max_concurrency": "8"); the Xray option surface allows ranges, so a
 // zero To is treated as a single-value range.
@@ -53,6 +72,10 @@ func (r Range) Rand() int {
 
 // XmuxOptions bounds how many streams/conections a single HTTP client may
 // carry before the transport dials another one.
+//
+// CMaxReuseTimes caps how often one pooled connection may be handed out again;
+// once the budget is spent the entry is closed as soon as it goes idle and a
+// fresh connection takes over, so no stream is ever cut.
 type XmuxOptions struct {
 	MaxConcurrency   Range
 	MaxConnections   Range
@@ -65,31 +88,56 @@ type XmuxOptions struct {
 // vendor config): a second server, TLS identity and mux pool used only for the
 // downstream half of a stream-up tunnel.
 type DownloadOptions struct {
-	Server   M.Socksaddr
-	TLS      *vmess.TLSConfig
-	Path     string
-	Host     string
-	Headers  map[string]string
-	ObfsKey  string
+	Server  M.Socksaddr
+	TLS     *vmess.TLSConfig
+	Path    string
+	Host    string
+	Headers map[string]string
+	// ObfsKey mirrors Config.ObfsKey: nil inherits the upload key, a pointer to
+	// "" explicitly runs the download half without the obfs layer.
+	ObfsKey  *string
 	XPadding Range
 	Xmux     *XmuxOptions
 }
 
 // Config is the normalized transport configuration.
 type Config struct {
-	Server   M.Socksaddr
-	TLS      *vmess.TLSConfig
-	Path     string
-	Mode     string
-	Host     string
-	Headers  map[string]string
-	ObfsKey  string
+	Server  M.Socksaddr
+	TLS     *vmess.TLSConfig
+	Path    string
+	Mode    string
+	Host    string
+	Headers map[string]string
+	// ObfsKey is required: nil fails Validate ("obfs-key is required for
+	// v2rayxhttp transport"), while a pointer to the empty string is the
+	// explicit opt-out that runs the stream without the obfs preamble. The
+	// pointer exists so a forgotten key cannot silently degrade to cleartext.
+	ObfsKey  *string
 	XPadding Range
 	// UplinkHTTPMethod is the HTTP verb of the upstream stream ("POST" by
 	// default, "GET" only valid in packet-up).
 	UplinkHTTPMethod string
 	Xmux             *XmuxOptions
 	Download         *DownloadOptions
+}
+
+// ObfsKeyValue returns the configured obfs key. Validate guarantees ObfsKey is
+// non-nil, so an empty result means the node explicitly disabled obfs.
+func (c *Config) ObfsKeyValue() string {
+	return obfsKeyValue(c.ObfsKey)
+}
+
+// ObfsKeyValue returns the download obfs key (Validate fills in the inherited
+// upload key when the download block leaves it unset).
+func (d *DownloadOptions) ObfsKeyValue() string {
+	return obfsKeyValue(d.ObfsKey)
+}
+
+func obfsKeyValue(key *string) string {
+	if key == nil {
+		return ""
+	}
+	return *key
 }
 
 // Validate normalizes the configuration and rejects modes this port does not
@@ -138,9 +186,19 @@ func (c *Config) Validate() error {
 			return errors.New("v2rayxhttp: max_connections cannot be specified together with max_concurrency")
 		}
 	}
+	// Obfs is mandatory unless the node explicitly opts out. A node that forgot
+	// `obfs-key` would otherwise send a bare TLS record to a server that expects
+	// the 20-byte obfs preamble and the peer would drop the connection, leaving
+	// the user with an unexplained timeout. Fail at construction time instead.
+	if c.ObfsKey == nil {
+		return errors.New(`v2rayxhttp: obfs-key is required for v2rayxhttp transport (write obfs-key: "" to explicitly disable the obfs layer)`)
+	}
 	if c.TLS == nil {
 		return errors.New("v2rayxhttp: TLS is required")
 	}
+	// Never edit the caller's TLS config in place: the adapter may hand the same
+	// pointer to several endpoints, and the download block inherits it below.
+	c.TLS = cloneTLS(c.TLS)
 	if c.TLS.Host == "" {
 		c.TLS.Host = c.Server.Fqdn
 	}
@@ -148,7 +206,7 @@ func (c *Config) Validate() error {
 		c.Host = c.TLS.Host
 	}
 	if len(c.TLS.NextProtos) == 0 {
-		c.TLS.NextProtos = []string{"h2"}
+		c.TLS.NextProtos = []string{ALPNH2}
 	}
 	if c.Download != nil {
 		d := c.Download
@@ -156,13 +214,15 @@ func (c *Config) Validate() error {
 			return errors.New("v2rayxhttp: download.server is required")
 		}
 		if d.TLS == nil {
-			d.TLS = c.TLS
+			d.TLS = cloneTLS(c.TLS)
+		} else {
+			d.TLS = cloneTLS(d.TLS)
 		}
 		if d.TLS.Host == "" {
 			d.TLS.Host = d.Server.Fqdn
 		}
 		if len(d.TLS.NextProtos) == 0 {
-			d.TLS.NextProtos = []string{"h2"}
+			d.TLS.NextProtos = []string{ALPNH2}
 		}
 		if d.Path == "" {
 			d.Path = c.Path
@@ -171,7 +231,7 @@ func (c *Config) Validate() error {
 		if d.Host == "" {
 			d.Host = d.TLS.Host
 		}
-		if d.ObfsKey == "" {
+		if d.ObfsKey == nil {
 			d.ObfsKey = c.ObfsKey
 		}
 		if d.XPadding.From <= 0 && d.XPadding.To <= 0 {
@@ -185,6 +245,18 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// cloneTLS returns a private copy of cfg, ALPN list included, so a validation
+// pass can apply defaults without touching a config owned by the caller or
+// shared with another endpoint.
+func cloneTLS(cfg *vmess.TLSConfig) *vmess.TLSConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.NextProtos = append([]string(nil), cfg.NextProtos...)
+	return &clone
 }
 
 // normalizePath returns the request path with a leading slash and, because the

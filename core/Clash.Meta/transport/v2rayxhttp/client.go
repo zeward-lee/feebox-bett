@@ -3,6 +3,7 @@ package v2rayxhttp
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -43,7 +44,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, config *Config) (*Client, e
 		path:     config.Path,
 		host:     config.Host,
 		headers:  config.Headers,
-		obfsKey:  config.ObfsKey,
+		obfsKey:  config.ObfsKeyValue(),
 		padding:  config.XPadding,
 		xmux:     config.Xmux,
 		method:   config.UplinkHTTPMethod,
@@ -62,7 +63,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, config *Config) (*Client, e
 			path:     d.Path,
 			host:     d.Host,
 			headers:  d.Headers,
-			obfsKey:  d.ObfsKey,
+			obfsKey:  d.ObfsKeyValue(),
 			padding:  d.XPadding,
 			xmux:     d.Xmux,
 			method:   config.UplinkHTTPMethod,
@@ -106,6 +107,14 @@ func (c *Client) dialStreamUp(ctx context.Context, session string) (net.Conn, er
 		}
 		return nil, err
 	}
+	// Link the halves: the upload and the download are two independent HTTP
+	// requests here, so a dead upload would otherwise leave the anytls session
+	// blocked on a download read that never completes or fails. Failing the
+	// reader with the upload error makes the failure visible to the session.
+	writer.setOnFailure(func(err error) {
+		reader.fail(err)
+		_ = reader.Close()
+	})
 	conn := &streamConn{
 		reader:     reader,
 		writer:     writer,
@@ -234,27 +243,59 @@ func newEndpoint(dialer N.Dialer, options endpointOptions) (*endpoint, error) {
 	return e, nil
 }
 
-// newHTTPClient builds an HTTP/2 client whose single connection is dialed
-// through the proxy dialer, optionally obfuscated, then TLS-wrapped.
+// newHTTPClient builds a client whose single connection is dialed through the
+// proxy dialer, optionally obfuscated, then TLS-wrapped. The ALPN list decides
+// the protocol: h2 uses http2.Transport (one conn multiplexes streams), while a
+// node that asked for something else gets an HTTP/1.1 transport, where every
+// in-flight stream needs its own TCP connection.
 func (e *endpoint) newHTTPClient(dialer N.Dialer) (*http.Client, error) {
-	transport := &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, N.NetworkTCP, e.dest)
-			if err != nil {
-				return nil, err
-			}
-			conn = newObfsConn(conn, e.obfsKey)
-			tlsConn, err := vmess.StreamTLSConn(ctx, conn, e.tls)
-			if err != nil {
-				_ = conn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
-		},
-		IdleConnTimeout: idleConnTimeout,
-		ReadIdleTimeout: keepAlivePeriod,
+	dialConn := func(ctx context.Context, _ string, _ string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, N.NetworkTCP, e.dest)
+		if err != nil {
+			return nil, err
+		}
+		conn = newObfsConn(conn, e.obfsKey)
+		tlsConn, err := vmess.StreamTLSConn(ctx, conn, e.tls)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
 	}
-	return &http.Client{Transport: transport}, nil
+	var transport http.RoundTripper
+	if e.usesHTTP2() {
+		transport = &http2.Transport{
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return dialConn(ctx, network, addr)
+			},
+			IdleConnTimeout: idleConnTimeout,
+			ReadIdleTimeout: keepAlivePeriod,
+		}
+	} else {
+		// HTTP/1.1 fallback. ForceAttemptHTTP2 stays false so the transport can
+		// never upgrade behind the negotiated ALPN; Proxy stays nil because the
+		// node's own proxy chain already sits under the dialer.
+		transport = &http.Transport{
+			DialTLSContext:    dialConn,
+			ForceAttemptHTTP2: false,
+			IdleConnTimeout:   idleConnTimeout,
+		}
+	}
+	return &http.Client{Transport: &nonReplayableTransport{base: transport}}, nil
+}
+
+// usesHTTP2 reports whether the configured ALPN list can negotiate h2. An empty
+// list means "not configured" and Validate already defaulted it to h2.
+func (e *endpoint) usesHTTP2() bool {
+	if e.tls == nil || len(e.tls.NextProtos) == 0 {
+		return true
+	}
+	for _, proto := range e.tls.NextProtos {
+		if proto == ALPNH2 {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *endpoint) close() {
@@ -310,13 +351,21 @@ func (e *endpoint) openDownload(ctx context.Context, session string) (*waitReadC
 	return reader, entry, nil
 }
 
-func (e *endpoint) openUpload(ctx context.Context, session string) (io.WriteCloser, *muxEntry, error) {
+func (e *endpoint) openUpload(ctx context.Context, session string) (*pipeWriter, *muxEntry, error) {
 	client, entry, err := e.mux.acquire()
 	if err != nil {
 		return nil, nil, err
 	}
+	// The upload body is a live io.Pipe: it can only be sent once, so redirects
+	// must not replay it (a 307/308 would otherwise re-POST a truncated stream).
+	uploadClient := *client
+	uploadClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	requestCtx, cancel := context.WithCancel(contextutils.WithoutCancel(ctx))
+	requestCtx = context.WithValue(requestCtx, uploadAttemptKey{}, &uploadAttempt{})
 	pr, pw := io.Pipe()
+	writer := newPipeWriter(pw)
 	req, err := http.NewRequestWithContext(requestCtx, e.method, e.requestURL(session).String(), pr)
 	if err != nil {
 		cancel()
@@ -327,31 +376,39 @@ func (e *endpoint) openUpload(ctx context.Context, session string) (io.WriteClos
 	req.Header.Set("Content-Type", "application/grpc")
 	req.ContentLength = -1
 	go func() {
-		resp, err := client.Do(req)
+		resp, err := uploadClient.Do(req)
 		if err != nil {
-			_ = pw.CloseWithError(err)
+			// Record on the write path first (so the next Write returns it and
+			// nothing is silently swallowed), then let the hook fail the read
+			// half with the same cause.
+			writer.fail(fmt.Errorf("v2rayxhttp: upload stream: %w", err))
+			cancel()
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			writer.fail(fmt.Errorf("v2rayxhttp: upload stream returned %s", resp.Status))
 			cancel()
 			return
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			_ = pw.CloseWithError(fmt.Errorf("v2rayxhttp: upload stream returned %s", resp.Status))
-		}
 		cancel()
 	}()
-	return pw, entry, nil
+	return writer, entry, nil
 }
 
 // openSingleStream implements mode stream-one: a single POST whose response
 // body is the downstream half.
-func (e *endpoint) openSingleStream(ctx context.Context, session string) (io.ReadCloser, io.WriteCloser, *muxEntry, error) {
+func (e *endpoint) openSingleStream(ctx context.Context, session string) (io.ReadCloser, *pipeWriter, *muxEntry, error) {
 	client, entry, err := e.mux.acquire()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	requestCtx, cancel := context.WithCancel(contextutils.WithoutCancel(ctx))
+	requestCtx = context.WithValue(requestCtx, uploadAttemptKey{}, &uploadAttempt{})
 	pr, pw := io.Pipe()
+	writer := newPipeWriter(pw)
 	req, err := http.NewRequestWithContext(requestCtx, e.method, e.requestURL(session).String(), pr)
 	if err != nil {
 		cancel()
@@ -362,20 +419,24 @@ func (e *endpoint) openSingleStream(ctx context.Context, session string) (io.Rea
 	req.Header.Set("Content-Type", "application/grpc")
 	req.ContentLength = -1
 	reader := newWaitReadCloser(cancel)
+	writer.setOnFailure(func(err error) {
+		reader.fail(err)
+		_ = reader.Close()
+	})
 	go func() {
 		resp, err := client.Do(req)
 		if err != nil {
-			reader.fail(err)
+			writer.fail(fmt.Errorf("v2rayxhttp: stream: %w", err))
 			return
 		}
 		if resp.StatusCode != http.StatusOK {
 			_ = resp.Body.Close()
-			reader.fail(fmt.Errorf("v2rayxhttp: stream returned %s", resp.Status))
+			writer.fail(fmt.Errorf("v2rayxhttp: stream returned %s", resp.Status))
 			return
 		}
 		reader.set(resp.Body)
 	}()
-	return reader, pw, entry, nil
+	return reader, writer, entry, nil
 }
 
 func defaultHeaders() http.Header {
@@ -441,7 +502,20 @@ func (w *waitReadCloser) Read(b []byte) (int, error) {
 	if body == nil || closed {
 		return 0, io.ErrClosedPipe
 	}
-	return body.Read(b)
+	n, err := body.Read(b)
+	if err != nil {
+		// A failure recorded while this read was blocked is the real cause (for
+		// stream-up it is the upload half dying and aborting the stream), so
+		// report it instead of the generic "response body closed" the aborted
+		// read produces.
+		w.mu.Lock()
+		recorded := w.err
+		w.mu.Unlock()
+		if recorded != nil {
+			return n, recorded
+		}
+	}
+	return n, err
 }
 
 func (w *waitReadCloser) Close() error {
@@ -463,11 +537,118 @@ func (w *waitReadCloser) Close() error {
 	return nil
 }
 
+// pipeWriter is the upload half of a stream. It owns the io.PipeWriter feeding
+// the request body and remembers the first transport-level failure, so a dead
+// upload is reported on the write path instead of surfacing as a broken pipe
+// with no cause, and (through onFailure) on the download half as well.
+type pipeWriter struct {
+	pw *io.PipeWriter
+
+	mu        sync.Mutex
+	err       error
+	onFailure func(error)
+}
+
+func newPipeWriter(pw *io.PipeWriter) *pipeWriter {
+	return &pipeWriter{pw: pw}
+}
+
+func (w *pipeWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	stored := w.err
+	w.mu.Unlock()
+	if stored != nil {
+		return 0, stored
+	}
+	return w.pw.Write(b)
+}
+
+func (w *pipeWriter) Close() error {
+	return w.pw.Close()
+}
+
+// setOnFailure registers the read-side failure hook. It fires immediately when
+// the upload already failed, so a failure racing the dialer cannot be missed.
+// Hooks must be idempotent (the ones installed by this package are).
+func (w *pipeWriter) setOnFailure(hook func(error)) {
+	w.mu.Lock()
+	w.onFailure = hook
+	err := w.err
+	w.mu.Unlock()
+	if err != nil && hook != nil {
+		hook(err)
+	}
+}
+
+// fail records err (first one wins), unblocks a pending Write and then runs the
+// hook. Repeated failures are no-ops.
+func (w *pipeWriter) fail(err error) {
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.err != nil {
+		w.mu.Unlock()
+		return
+	}
+	w.err = err
+	hook := w.onFailure
+	w.mu.Unlock()
+	_ = w.pw.CloseWithError(err)
+	if hook != nil {
+		hook(err)
+	}
+}
+
+// errUploadReplay is returned when the same one-shot upload stream is handed to
+// the HTTP stack twice. An io.Pipe body cannot be replayed: the retry would
+// either hang or send a truncated stream, both of which the server sees as a
+// corrupted session.
+var errUploadReplay = errors.New("v2rayxhttp: upload stream cannot be replayed")
+
+// uploadAttempt counts how often one upload stream reached the transport. It
+// travels in the request context.
+type uploadAttempt struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+type uploadAttemptKey struct{}
+
+// nonReplayableTransport makes the one-shot nature of the upload body explicit.
+// The request never carries GetBody, so net/http itself refuses to retry a
+// request whose body was already read; this wrapper additionally rejects a
+// second attempt for the same stream instead of silently replaying a consumed
+// io.Pipe. The one internal retry net/http still performs (a connection that
+// died before any byte was written) hands the untouched pipe back unchanged,
+// which is safe.
+type nonReplayableTransport struct {
+	base http.RoundTripper
+}
+
+func (t *nonReplayableTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.GetBody != nil {
+		return nil, errUploadReplay
+	}
+	attempt, ok := req.Context().Value(uploadAttemptKey{}).(*uploadAttempt)
+	if !ok {
+		return t.base.RoundTrip(req)
+	}
+	attempt.mu.Lock()
+	attempt.attempts++
+	replay := attempt.attempts > 1
+	attempt.mu.Unlock()
+	if replay {
+		return nil, errUploadReplay
+	}
+	return t.base.RoundTrip(req)
+}
+
 // streamConn is the net.Conn handed to the anytls client: reads come from the
 // downstream stream, writes go to the upstream stream.
 type streamConn struct {
 	reader     io.ReadCloser
-	writer     io.WriteCloser
+	writer     *pipeWriter
 	remoteAddr net.Addr
 	localAddr  net.Addr
 	onClose    func()

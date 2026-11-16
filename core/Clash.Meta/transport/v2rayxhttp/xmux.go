@@ -1,14 +1,27 @@
 package v2rayxhttp
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 )
 
+// errMuxSaturated is returned when a pool reached `max_connections` and every
+// live connection already carries `max_concurrency` streams. The dialer sees a
+// clear "no slot" error instead of the stream being pushed onto a connection
+// beyond its configured quota.
+var errMuxSaturated = errors.New("v2rayxhttp: xmux pool saturated (max_connections reached, every connection at max_concurrency)")
+
 // muxManager mirrors the vendor `xmux` pool: every HTTP/2 connection is a pool
 // entry, and a new one is dialed when all entries reached `max_concurrency`
 // concurrent streams (or when `max_connections`/reuse limits say so).
+//
+// The pool is bounded by two independent limits: `max_concurrency` caps the
+// streams riding one connection and `max_connections` caps the connections.
+// Their product is the hard ceiling on concurrent streams; once both are spent
+// acquire() fails instead of over-subscribing a connection.
 type muxManager struct {
 	mu sync.Mutex
 
@@ -17,6 +30,7 @@ type muxManager struct {
 	maxConcurrency int
 	maxConnections int
 	maxRequests    int
+	maxReuseTimes  int
 	maxReusable    time.Duration
 
 	factory func() (*http.Client, error)
@@ -28,7 +42,10 @@ type muxEntry struct {
 	client   *http.Client
 	open     int
 	requests int
-	created  time.Time
+	// reuses counts how often this entry was handed out again after its first
+	// stream, the counter behind `c_max_reuse_times`.
+	reuses  int
+	created time.Time
 }
 
 func newMuxManager(options *XmuxOptions, factory func() (*http.Client, error)) *muxManager {
@@ -37,6 +54,7 @@ func newMuxManager(options *XmuxOptions, factory func() (*http.Client, error)) *
 		m.maxConcurrency = options.MaxConcurrency.Rand()
 		m.maxConnections = options.MaxConnections.Rand()
 		m.maxRequests = options.HMaxRequestTimes.Rand()
+		m.maxReuseTimes = options.CMaxReuseTimes.Rand()
 		if secs := options.HMaxReusableSecs.Rand(); secs > 0 {
 			m.maxReusable = time.Duration(secs) * time.Second
 		}
@@ -61,24 +79,27 @@ func (m *muxManager) acquire() (*http.Client, *muxEntry, error) {
 	}
 	m.entries = live
 	now := time.Now()
+	// Reusable entries first; a connection that spent its `c_max_reuse_times`
+	// budget is skipped here and closed once its last stream finishes.
+	active := 0
 	for _, entry := range m.entries {
+		if !m.canReuse(entry) {
+			continue
+		}
+		active++
 		if m.maxConcurrency <= 0 || entry.open < m.maxConcurrency {
 			entry.open++
 			entry.requests++
+			if entry.open > 1 {
+				entry.reuses++
+			}
 			return entry.client, entry, nil
 		}
 	}
-	// All entries are saturated. Honour max_connections, otherwise grow the pool.
-	if m.maxConnections > 0 && len(m.entries) >= m.maxConnections {
-		entry := m.entries[0]
-		for _, candidate := range m.entries[1:] {
-			if candidate.open < entry.open {
-				entry = candidate
-			}
-		}
-		entry.open++
-		entry.requests++
-		return entry.client, entry, nil
+	// Every connection is at its stream quota. Honour max_connections: a full
+	// pool is an error, never a stream pushed past max_concurrency.
+	if m.maxConnections > 0 && active >= m.maxConnections {
+		return nil, nil, fmt.Errorf("%w (max_connections=%d, max_concurrency=%d)", errMuxSaturated, m.maxConnections, m.maxConcurrency)
 	}
 	client, err := m.factory()
 	if err != nil {
@@ -91,11 +112,21 @@ func (m *muxManager) acquire() (*http.Client, *muxEntry, error) {
 	return client, entry, nil
 }
 
+// canReuse reports whether an entry may still take a new stream under
+// `c_max_reuse_times`. Entries that cannot are drained and then dropped by
+// expired().
+func (m *muxManager) canReuse(entry *muxEntry) bool {
+	return m.maxReuseTimes <= 0 || entry.reuses < m.maxReuseTimes
+}
+
 // expired reports whether an entry reached a reuse limit. An entry with open
 // streams is only reclaimed once idle, so an in-flight stream is never cut.
 func (m *muxManager) expired(entry *muxEntry) bool {
 	if entry.open > 0 {
 		return false
+	}
+	if !m.canReuse(entry) {
+		return true
 	}
 	if m.maxRequests > 0 && entry.requests >= m.maxRequests {
 		return true

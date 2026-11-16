@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/metacubex/mihomo/common/structure"
+	"github.com/metacubex/mihomo/transport/v2rayxhttp"
 
 	M "github.com/metacubex/sing/common/metadata"
 )
@@ -79,8 +81,8 @@ func TestXHTTPTransportOptionsDecode(t *testing.T) {
 	if option.XHTTPOpts.Path != "/rpcv2" {
 		t.Errorf("path = %q", option.XHTTPOpts.Path)
 	}
-	if option.XHTTPOpts.ObfsKey != "9uByRBBiCy" {
-		t.Errorf("obfs key = %q", option.XHTTPOpts.ObfsKey)
+	if option.XHTTPOpts.ObfsKey == nil || *option.XHTTPOpts.ObfsKey != "9uByRBBiCy" {
+		t.Errorf("obfs key = %v", option.XHTTPOpts.ObfsKey)
 	}
 	if option.XHTTPOpts.Xmux == nil || option.XHTTPOpts.Xmux.MaxConcurrency != "8" {
 		t.Errorf("xmux = %+v", option.XHTTPOpts.Xmux)
@@ -116,8 +118,8 @@ func TestXHTTPTransportBuildsClient(t *testing.T) {
 	if config.Path != "/rpcv2/" {
 		t.Errorf("path = %q", config.Path)
 	}
-	if config.ObfsKey != "9uByRBBiCy" {
-		t.Errorf("obfs key = %q", config.ObfsKey)
+	if config.ObfsKeyValue() != "9uByRBBiCy" {
+		t.Errorf("obfs key = %q", config.ObfsKeyValue())
 	}
 	if config.Server.String() != "82.163.67.20:6504" {
 		t.Errorf("server = %s", config.Server.String())
@@ -131,8 +133,8 @@ func TestXHTTPTransportBuildsClient(t *testing.T) {
 	if config.Download.Server.String() != "82.163.67.21:6504" {
 		t.Errorf("download server = %s", config.Download.Server.String())
 	}
-	if config.Download.ObfsKey != "9uByRBBiCy" {
-		t.Errorf("download obfs key = %q", config.Download.ObfsKey)
+	if config.Download.ObfsKeyValue() != "9uByRBBiCy" {
+		t.Errorf("download obfs key = %q", config.Download.ObfsKeyValue())
 	}
 	if config.Download.Xmux == nil || config.Download.Xmux.MaxConcurrency.From != 2 {
 		t.Errorf("download xmux = %+v", config.Download.Xmux)
@@ -186,5 +188,69 @@ func TestAnyTLSWithXHTTPTransport(t *testing.T) {
 	}
 	if adapter.xhttp.Config().Download == nil {
 		t.Fatal("download endpoint missing")
+	}
+}
+
+// TestXHTTPTransportRequiresObfsKey pins the fail-closed rule at the adapter
+// level: a node that omits `obfs-key` must fail out of NewAnyTLS (and therefore
+// out of the parser) instead of dialing the server without the obfs preamble.
+func TestXHTTPTransportRequiresObfsKey(t *testing.T) {
+	mapping := shanlianXHTTPFixture()
+	opts := mapping["xhttp-opts"].(map[string]any)
+	delete(opts, "obfs-key")
+	option := decodeAnyTLSOption(t, mapping)
+	if option.XHTTPOpts.ObfsKey != nil {
+		t.Fatalf("decoded obfs key = %v, want nil for an absent key", option.XHTTPOpts.ObfsKey)
+	}
+	if _, err := NewAnyTLS(*option); err == nil || !strings.Contains(err.Error(), "obfs-key is required for v2rayxhttp transport") {
+		t.Fatalf("NewAnyTLS error = %v, want the obfs-key required error", err)
+	}
+
+	// An explicit empty string is the documented cleartext opt-out and must be
+	// distinguishable from an absent key.
+	opts["obfs-key"] = ""
+	option = decodeAnyTLSOption(t, mapping)
+	if option.XHTTPOpts.ObfsKey == nil || *option.XHTTPOpts.ObfsKey != "" {
+		t.Fatalf("decoded obfs key = %v, want a pointer to the empty string", option.XHTTPOpts.ObfsKey)
+	}
+	adapter, err := NewAnyTLS(*option)
+	if err != nil {
+		t.Fatalf("explicit obfs opt-out should build: %v", err)
+	}
+	adapter.Close()
+	if got := adapter.xhttp.Config().ObfsKeyValue(); got != "" {
+		t.Errorf("transport obfs key = %q, want the explicit opt-out", got)
+	}
+}
+
+// TestXHTTPTransportUsesNodeALPN pins the review fix on the adapter side: the
+// node's `alpn` list wins, and only an unset list falls back to h2.
+func TestXHTTPTransportUsesNodeALPN(t *testing.T) {
+	mapping := shanlianXHTTPFixture()
+	mapping["alpn"] = []string{"h2", "http/1.1"}
+	option := decodeAnyTLSOption(t, mapping)
+	adapter, err := NewAnyTLS(*option)
+	if err != nil {
+		t.Fatalf("new anytls: %v", err)
+	}
+	defer adapter.Close()
+	got := adapter.xhttp.Config().TLS.NextProtos
+	if len(got) != 2 || got[0] != "h2" || got[1] != "http/1.1" {
+		t.Errorf("transport ALPN = %v, want [h2 http/1.1]", got)
+	}
+
+	// Default: h2 only.
+	option = decodeAnyTLSOption(t, shanlianXHTTPFixture())
+	adapter, err = NewAnyTLS(*option)
+	if err != nil {
+		t.Fatalf("new anytls: %v", err)
+	}
+	defer adapter.Close()
+	if got := adapter.xhttp.Config().TLS.NextProtos; len(got) != 1 || got[0] != v2rayxhttp.ALPNH2 {
+		t.Errorf("default transport ALPN = %v, want [%s]", got, v2rayxhttp.ALPNH2)
+	}
+	// The inner anytls TLS config must not be rewritten to the transport ALPN.
+	if inner := option.ALPN; len(inner) != 0 {
+		t.Errorf("node ALPN was mutated: %v", inner)
 	}
 }

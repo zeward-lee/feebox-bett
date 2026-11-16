@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/transport/vmess"
 
 	M "github.com/metacubex/sing/common/metadata"
+	"golang.org/x/net/http2"
 )
 
 // testDialer dials the loopback test server directly; the transport under test
@@ -234,7 +235,10 @@ func TestStreamUpRoundTrip(t *testing.T) {
 		TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
 		Path:   "/rpcv2",
 		Mode:   ModeStreamUp,
-		Xmux:   &XmuxOptions{MaxConcurrency: Range{From: 2, To: 2}},
+		// The httptest server speaks plain TLS: explicitly opt out of the obfs
+		// layer instead of leaving the key unset (which Validate rejects).
+		ObfsKey: obfsPtr(""),
+		Xmux:    &XmuxOptions{MaxConcurrency: Range{From: 2, To: 2}},
 		Download: &DownloadOptions{
 			Server: serverSocksaddr(t, server),
 			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
@@ -263,10 +267,11 @@ func TestStreamUpDownloadSplit(t *testing.T) {
 	uploadServer := newEchoServer(t, broker)
 	downloadServer := newEchoServer(t, broker)
 	config := &Config{
-		Server: serverSocksaddr(t, uploadServer),
-		TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
-		Path:   "/rpcv2",
-		Mode:   ModeStreamUp,
+		Server:  serverSocksaddr(t, uploadServer),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamUp,
+		ObfsKey: obfsPtr(""),
 		Download: &DownloadOptions{
 			Server: serverSocksaddr(t, downloadServer),
 			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
@@ -327,10 +332,11 @@ func newStreamOneServer(t *testing.T) *httptest.Server {
 func TestStreamOneRoundTrip(t *testing.T) {
 	server := newStreamOneServer(t)
 	config := &Config{
-		Server: serverSocksaddr(t, server),
-		TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
-		Path:   "/rpcv2",
-		Mode:   ModeStreamOne,
+		Server:  serverSocksaddr(t, server),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamOne,
+		ObfsKey: obfsPtr(""),
 	}
 	client, err := NewClient(context.Background(), testDialer{}, config)
 	if err != nil {
@@ -361,7 +367,7 @@ func TestTransportWrapsObfs(t *testing.T) {
 		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
 		Path:    "/rpcv2",
 		Mode:    ModeStreamUp,
-		ObfsKey: "9uByRBBiCy",
+		ObfsKey: obfsPtr("9uByRBBiCy"),
 		Download: &DownloadOptions{
 			Server: M.ParseSocksaddrHostPort(host, uint16(value)),
 			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
@@ -394,4 +400,179 @@ func TestTransportWrapsObfs(t *testing.T) {
 		t.Fatalf("first bytes look like a bare TLS record: %x (obfs layer missing)", head)
 	}
 	<-dialErr
+}
+
+// TestEndpointSelectsTransportByALPN pins the review fix: the node's `alpn`
+// list decides the stream layer, h2 keeps http2.Transport and anything else
+// gets an HTTP/1.1 transport that never attempts an h2 upgrade.
+func TestEndpointSelectsTransportByALPN(t *testing.T) {
+	h2 := &endpoint{tls: &vmess.TLSConfig{Host: "example.com", NextProtos: []string{ALPNH2}}}
+	client, err := h2.newHTTPClient(testDialer{})
+	if err != nil {
+		t.Fatalf("h2 client: %v", err)
+	}
+	base := client.Transport.(*nonReplayableTransport).base
+	if _, ok := base.(*http2.Transport); !ok {
+		t.Fatalf("ALPN [h2] picked %T, want *http2.Transport", base)
+	}
+
+	h1 := &endpoint{tls: &vmess.TLSConfig{Host: "example.com", NextProtos: []string{"http/1.1"}}}
+	client, err = h1.newHTTPClient(testDialer{})
+	if err != nil {
+		t.Fatalf("h1 client: %v", err)
+	}
+	base = client.Transport.(*nonReplayableTransport).base
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		t.Fatalf("ALPN [http/1.1] picked %T, want *http.Transport", base)
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Error("HTTP/1.1 fallback must not attempt an h2 upgrade")
+	}
+}
+
+func newEchoServerHTTP1(t *testing.T, broker *echoBroker) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.Handle("/rpcv2/", broker)
+	server := httptest.NewUnstartedServer(mux)
+	server.EnableHTTP2 = false
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestStreamUpOverHTTP1 exercises the HTTP/1.1 path end to end: a node that sets
+// `alpn: [http/1.1]` must still carry the stream pair (one request per
+// connection) instead of being stuck on the h2 transport.
+func TestStreamUpOverHTTP1(t *testing.T) {
+	broker := newEchoBroker()
+	server := newEchoServerHTTP1(t, broker)
+	config := &Config{
+		Server:  serverSocksaddr(t, server),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true, NextProtos: []string{"http/1.1"}},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamUp,
+		ObfsKey: obfsPtr(""),
+		Download: &DownloadOptions{
+			Server: serverSocksaddr(t, server),
+			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true, NextProtos: []string{"http/1.1"}},
+		},
+	}
+	client, err := NewClient(context.Background(), testDialer{}, config)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := client.DialContext(dialCtx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	roundTrip(t, conn, "h1 fallback")
+}
+
+// TestUploadFailureSurfacesOnBothHalves is the review's error-swallowing fix: a
+// rejected upload stream must fail the download read and poison the write path
+// instead of leaving the anytls session blocked on a silent hang.
+func TestUploadFailureSurfacesOnBothHalves(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rpcv2/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
+		http.Error(w, "upload rejected", http.StatusInternalServerError)
+	})
+	server := httptest.NewUnstartedServer(mux)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	config := &Config{
+		Server:  serverSocksaddr(t, server),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamUp,
+		ObfsKey: obfsPtr(""),
+		Download: &DownloadOptions{
+			Server: serverSocksaddr(t, server),
+			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		},
+	}
+	client, err := NewClient(context.Background(), testDialer{}, config)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+	conn, err := client.DialContext(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	readErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 8)
+		_, err := conn.Read(buf)
+		readErr <- err
+	}()
+	select {
+	case err := <-readErr:
+		if err == nil || !strings.Contains(err.Error(), "500") {
+			t.Fatalf("download read error = %v, want the upload 500", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("download read hung after the upload stream failed")
+	}
+	if _, err := conn.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("write error = %v, want the upload 500", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestUploadStreamIsNotReplayable pins the one-shot contract: a second attempt
+// for the same upload stream (transport retry, redirect re-POST) must fail
+// loudly rather than replay a consumed io.Pipe.
+func TestUploadStreamIsNotReplayable(t *testing.T) {
+	calls := 0
+	base := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	transport := &nonReplayableTransport{base: base}
+	attempt := &uploadAttempt{}
+	req := httptest.NewRequest(http.MethodPost, "https://example.com/rpcv2/session", strings.NewReader("body"))
+	req = req.WithContext(context.WithValue(context.Background(), uploadAttemptKey{}, attempt))
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if _, err := transport.RoundTrip(req); !errors.Is(err, errUploadReplay) {
+		t.Fatalf("replay error = %v, want errUploadReplay", err)
+	}
+	if calls != 1 {
+		t.Errorf("base transport saw %d attempts, want 1", calls)
+	}
+
+	// A request that advertises GetBody could be replayed by net/http itself, so
+	// it is refused up front.
+	replayable := httptest.NewRequest(http.MethodPost, "https://example.com/rpcv2/session", strings.NewReader("body"))
+	replayable.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("body")), nil
+	}
+	if _, err := transport.RoundTrip(replayable); !errors.Is(err, errUploadReplay) {
+		t.Fatalf("GetBody request error = %v, want errUploadReplay", err)
+	}
 }

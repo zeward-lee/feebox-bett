@@ -42,10 +42,20 @@ type Client struct {
 	padding        atomic.Pointer[padding.PaddingFactory]
 }
 
+// ShanlianPasswordMarker is the suffix the vendor client puts on a Shanlian
+// node's password: the part before it is the raw 32-byte key in hex and is used
+// directly as passwordSha256 instead of hashing the literal string.
+const ShanlianPasswordMarker = "#sl"
+
+// IsShanlianPassword reports whether password carries the Shanlian marker. The
+// marker match is case-insensitive.
+func IsShanlianPassword(password string) bool {
+	return strings.HasSuffix(strings.ToLower(password), ShanlianPasswordMarker)
+}
+
 func decodeClientPassword(password string) ([]byte, error) {
-	const marker = "#sl"
-	if strings.HasSuffix(strings.ToLower(password), marker) {
-		raw := password[:len(password)-len(marker)]
+	if IsShanlianPassword(password) {
+		raw := password[:len(password)-len(ShanlianPasswordMarker)]
 		if len(raw) != sha256.Size*2 {
 			return nil, errors.New("anytls: Shanlian password must be 64 hexadecimal characters before #sl")
 		}

@@ -60,6 +60,13 @@ const (
 	Ninja
 	Oppa
 	XHttp
+	// Shanlian and Fastup share another protocol's wire (anytls and trojan
+	// respectively) but are published as their own `type` by the vendor
+	// subscriptions, so they carry a distinct identity for the API/UI. Always
+	// append new types: the numeric values of the previous entries must not
+	// shift.
+	Shanlian
+	Fastup
 )
 
 const (
@@ -258,6 +265,10 @@ func (at AdapterType) String() string {
 		return "Oppa"
 	case XHttp:
 		return "XHttp"
+	case Shanlian:
+		return "Shanlian"
+	case Fastup:
+		return "Fastup"
 	case Relay:
 		return "Relay"
 	case Selector:

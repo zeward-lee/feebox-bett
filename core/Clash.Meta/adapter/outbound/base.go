@@ -88,6 +88,14 @@ func (b *Base) Type() C.AdapterType {
 	return b.tp
 }
 
+// SetAdapterType overrides the identity reported through Type()/MarshalJSON.
+// Vendor variants that reuse another protocol's wire (Shanlian over anytls,
+// Fastup over trojan) set their own type from the parser after construction,
+// so the API and the UI see the vendor's name instead of the base protocol.
+func (b *Base) SetAdapterType(t C.AdapterType) {
+	b.tp = t
+}
+
 func (b *Base) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	return nil, C.ErrNotSupport
 }

@@ -95,6 +95,17 @@ func IsFastupTrojanPassword(password string) bool {
 	return strings.HasSuffix(password, fastupPasswordSuffix)
 }
 
+// EnsureFastupPasswordMarker appends the "#fastup" marker to a password that
+// does not carry it. Subscriptions that publish `type: fastup` may omit the
+// marker because the type already implies the variant; the derivation below
+// still keys off the marker, so translate it once in the parser.
+func EnsureFastupPasswordMarker(password string) string {
+	if IsFastupTrojanPassword(password) {
+		return password
+	}
+	return password + fastupPasswordSuffix
+}
+
 // deriveTrojanPassword returns the password the trojan handshake actually uses
 // and whether the Fastup marker was found. Anything without the exact suffix is
 // returned unchanged, with or without mpw.

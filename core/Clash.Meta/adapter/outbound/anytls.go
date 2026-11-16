@@ -91,6 +91,17 @@ func (t *AnyTLS) Close() error {
 	return t.client.Close()
 }
 
+// EnsureShanlianPasswordMarker appends the "#sl" marker to a password that does
+// not carry it. Subscriptions that publish `type: shanlian` may omit the marker
+// because the type already implies the variant; the anytls client still keys
+// the direct authentication off the marker, so translate it once in the parser.
+func EnsureShanlianPasswordMarker(password string) string {
+	if anytls.IsShanlianPassword(password) {
+		return password
+	}
+	return password + anytls.ShanlianPasswordMarker
+}
+
 func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 	outbound := &AnyTLS{

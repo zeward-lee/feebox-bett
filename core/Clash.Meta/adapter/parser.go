@@ -133,6 +133,28 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			}, proxy)
 			forcedFastupMux = err == nil
 		}
+	case "fastup":
+		// `type: fastup` is the vendor's own name for the trojan wire: the
+		// #fastup password derivation plus a forced h2mux session. The marker
+		// may be omitted because the type implies it; the plain `trojan` case
+		// above keeps accepting the old `password: ...#fastup` spelling.
+		trojanOption := &outbound.TrojanOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, trojanOption)
+		if err != nil {
+			break
+		}
+		trojanOption.Password = outbound.EnsureFastupPasswordMarker(trojanOption.Password)
+		var fastupAdapter *outbound.Trojan
+		fastupAdapter, err = outbound.NewTrojan(*trojanOption)
+		if err != nil {
+			break
+		}
+		fastupAdapter.SetAdapterType(C.Fastup)
+		proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
+			Enabled:  true,
+			Protocol: "h2mux",
+		}, fastupAdapter)
+		forcedFastupMux = err == nil
 	case "hysteria":
 		hyOption := &outbound.HysteriaOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, hyOption)
@@ -231,6 +253,24 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewAnyTLS(*anytlsOption)
+	case "shanlian":
+		// `type: shanlian` is the vendor's own name for the anytls wire with the
+		// Shanlian direct-authentication password. The "#sl" marker may be
+		// omitted because the type implies it; the plain `anytls` case above
+		// keeps accepting the old `password: ...#SL` spelling.
+		anytlsOption := &outbound.AnyTLSOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, anytlsOption)
+		if err != nil {
+			break
+		}
+		anytlsOption.Password = outbound.EnsureShanlianPasswordMarker(anytlsOption.Password)
+		var shanlianAdapter *outbound.AnyTLS
+		shanlianAdapter, err = outbound.NewAnyTLS(*anytlsOption)
+		if err != nil {
+			break
+		}
+		shanlianAdapter.SetAdapterType(C.Shanlian)
+		proxy = shanlianAdapter
 	case "miu":
 		miuOption := &outbound.MiuOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, miuOption)

@@ -44,8 +44,13 @@ type DstAddr struct {
 type Client struct {
 	uuid   uuid.UUID
 	Addons *Addons
+	// IsX365 selects the x365 request format for a `type: vless` node whose uuid
+	// carries the #x365 marker. The standalone `type: x365` outbound keeps its own
+	// transport; this flag only covers a node pasted with the marker.
+	IsX365 bool
 	// mode selects the private wire format. ModeStandard is the upstream vless
-	// request; ModeJuzi adds an HMAC tag to it; ModePure replaces it entirely.
+	// request; ModeJuzi adds an HMAC tag to it; ModeX365 replaces it with the
+	// x365 request; ModePure replaces it entirely.
 	mode PrivateMode
 }
 
@@ -86,5 +91,6 @@ func NewClient(uuidStr string, addons *Addons) (*Client, error) {
 		uuid:   uid,
 		Addons: addons,
 		mode:   mode,
+		IsX365: mode == ModeX365,
 	}, nil
 }

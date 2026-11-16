@@ -59,8 +59,11 @@ func TestPrivateSuffixIsolation(t *testing.T) {
 	}{
 		{base + "#juzi", base, ModeJuzi, false},
 		{base + "#JuZi", base, ModeJuzi, false},
+		{base + "#x365", base, ModeX365, false},
+		{base + "#X365", base + "#X365", ModeStandard, false},
 		{base + "#juzi#pure", "", ModePure, true},
 		{base + "#pure#juzi", "", ModePure, true},
+		{base + "#pure#x365", "", ModePure, true},
 	}
 	for _, tc := range cases {
 		clean, mode, err := parsePrivateUUID(tc.input)
@@ -77,9 +80,11 @@ func TestPrivateSuffixIsolation(t *testing.T) {
 
 func TestPrivateMarkersAreMutuallyExclusive(t *testing.T) {
 	for _, value := range []string{
-		"00112233-4455-6677-8899-aabbccddeeff#juzi#pure",
+		"00112233-4455-6677-8899-aabbccddeeff#juzi#x365",
+		"00112233-4455-6677-8899-aabbccddeeff#x365#juzi",
+		"00112233-4455-6677-8899-aabbccddeeff#pure#x365",
 		"00112233-4455-6677-8899-aabbccddeeff#pure#juzi",
-		"00112233-4455-6677-8899-aabbccddeeff#pure#pure",
+		"00112233-4455-6677-8899-aabbccddeeff#juzi#pure",
 	} {
 		if _, _, err := parsePrivateUUID(value); err == nil {
 			t.Fatalf("mixed private UUID %q was accepted", value)

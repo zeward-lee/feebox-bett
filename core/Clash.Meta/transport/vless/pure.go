@@ -16,6 +16,7 @@ type PrivateMode uint8
 
 const (
 	ModeStandard PrivateMode = iota
+	ModeX365
 	ModeJuzi
 	ModePure
 )
@@ -27,7 +28,8 @@ func parsePrivateUUID(value string) (id string, mode PrivateMode, err error) {
 	lower := strings.ToLower(value)
 	if strings.Contains(lower, "#pure") {
 		rest := value[:strings.LastIndex(lower, "#pure")]
-		if !strings.HasSuffix(lower, "#pure") || strings.Contains(strings.ToLower(rest), "#juzi") {
+		if !strings.HasSuffix(lower, "#pure") ||
+			strings.Contains(strings.ToLower(rest), "#juzi") || strings.Contains(rest, "#x365") {
 			return "", ModePure, fmt.Errorf("private protocol markers must be one exact suffix")
 		}
 		id = rest
@@ -37,12 +39,28 @@ func parsePrivateUUID(value string) (id string, mode PrivateMode, err error) {
 		return id, ModePure, nil
 	}
 	if strings.Contains(lower, "#juzi") {
-		if !strings.HasSuffix(lower, "#juzi") || strings.Contains(lower[:strings.LastIndex(lower, "#juzi")], "#pure") {
+		if !strings.HasSuffix(lower, "#juzi") {
+			return "", ModeJuzi, fmt.Errorf("private protocol markers must be one exact suffix")
+		}
+		rest := value[:strings.LastIndex(lower, "#juzi")]
+		if strings.Contains(strings.ToLower(rest), "#pure") || strings.Contains(rest, "#x365") {
 			return "", ModeJuzi, fmt.Errorf("private protocol markers must be one exact suffix")
 		}
 		// Juzi only tags the upstream request, so the id keeps going through
 		// utils.UUIDMap and may be a bare 32 hex digit UUID.
-		return value[:len(value)-len("#juzi")], ModeJuzi, nil
+		return rest, ModeJuzi, nil
+	}
+	// The x365 marker is case sensitive on purpose: "#X365" is plain text, which
+	// keeps a node name that happens to end that way from switching the wire.
+	if strings.Contains(value, "#x365") {
+		if !strings.HasSuffix(value, "#x365") {
+			return "", ModeX365, fmt.Errorf("private protocol markers must be one exact suffix")
+		}
+		rest := value[:len(value)-len("#x365")]
+		if strings.Contains(strings.ToLower(rest), "#pure") || strings.Contains(strings.ToLower(rest), "#juzi") {
+			return "", ModeX365, fmt.Errorf("private protocol markers must be one exact suffix")
+		}
+		return rest, ModeX365, nil
 	}
 	return value, ModeStandard, nil
 }

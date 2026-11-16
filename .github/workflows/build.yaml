@@ -1,6 +1,8 @@
 name: build
 
-# Private feebox-bett line.
+# feebox-bett public line (repository is permanently public since 2026-11-16;
+# the old build-flip / ensure-private visibility flip is gone — dispatch this
+# workflow directly).
 # - No push trigger on purpose: branch pushes must never consume runners.
 # - Manual verification goes through workflow_dispatch, releases through v* tags.
 # - Android lane is enabled (arm64 apk, release-signed from the KEYSTORE secret);

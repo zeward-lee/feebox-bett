@@ -54,6 +54,15 @@ type Client struct {
 	mode PrivateMode
 }
 
+// PrivateMode reports the private wire format the uuid markers of this client
+// selected: ModeX365 for the "#x365" suffix, ModeJuzi for "#juzi", ModePure for
+// "#pure", and ModeStandard for a node without a marker. The outbound adapter
+// publishes the vendor identity from it, so one node string drives both the
+// wire and the name the API/UI show.
+func (c *Client) PrivateMode() PrivateMode {
+	return c.mode
+}
+
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
 	if c.mode == ModePure {

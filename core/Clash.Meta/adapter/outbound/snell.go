@@ -634,6 +634,14 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		echTLSLegacyFallback:  echOpt.LegacyFallback,
 	}
 	s.dialer = option.NewDialer(s.DialOptions())
+	// OIX is the vendor's own name for the snell wire with the identity header:
+	// the psk marker (#oix), the oix-ech-tls alias and the flat oix_* keys all
+	// select it, and `oix` above is exactly that decision. Publish the vendor
+	// identity so the API and the UI show OIX instead of Snell; a plain snell
+	// node keeps Snell.
+	if oix {
+		s.SetAdapterType(C.OIX)
+	}
 
 	if isSnellECHTLSMode(obfsOption.Mode) {
 		echConfig, err := snellECHTLSConfig(echOpt)

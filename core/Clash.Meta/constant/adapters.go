@@ -67,6 +67,15 @@ const (
 	// shift.
 	Shanlian
 	Fastup
+	// The remaining vendor variants borrow a base protocol's wire the same way:
+	// the marker that switches the wire travels in the node's password or uuid,
+	// and the adapter publishes the vendor identity instead of the base protocol
+	// so the API and the UI show the protocol's own name.
+	ViewTurbo
+	Blackstone
+	OIX
+	Juzi
+	Pure
 )
 
 const (
@@ -269,6 +278,16 @@ func (at AdapterType) String() string {
 		return "Shanlian"
 	case Fastup:
 		return "Fastup"
+	case ViewTurbo:
+		return "ViewTurbo"
+	case Blackstone:
+		return "Blackstone"
+	case OIX:
+		return "OIX"
+	case Juzi:
+		return "Juzi"
+	case Pure:
+		return "Pure"
 	case Relay:
 		return "Relay"
 	case Selector:

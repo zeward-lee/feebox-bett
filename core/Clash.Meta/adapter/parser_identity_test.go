@@ -207,3 +207,149 @@ func TestParseUnmarkedNodesKeepBaseIdentity(t *testing.T) {
 		t.Fatal("plain trojan was wrapped with sing-mux")
 	}
 }
+
+// The borrow-shell identities: every vendor variant that reuses another
+// protocol's wire but carries its own name must report that name, because the
+// UI maps the reported type to the protocol's own label (ViewTurbo、黑石、OIX、
+// X365、Juzi、Pure).
+func TestParseBorrowShellIdentities(t *testing.T) {
+	cases := []struct {
+		name    string
+		mapping map[string]any
+		want    C.AdapterType
+	}{
+		{
+			// ss + password ending in #VT is the ViewTurbo variant.
+			name: "ss viewturbo",
+			mapping: map[string]any{
+				"name":     "ViewTurbo fixture",
+				"type":     "ss",
+				"server":   "node.example",
+				"port":     8388,
+				"password": "synthetic-token#VT",
+				"cipher":   "chacha20-ietf-poly1305",
+			},
+			want: C.ViewTurbo,
+		},
+		{
+			// ss + password ending in #BLACKSTONE is the blackstone variant; the
+			// parser also defaults its cipher, so the marker alone is enough.
+			name: "ss blackstone",
+			mapping: map[string]any{
+				"name":     "Blackstone fixture",
+				"type":     "ss",
+				"server":   "node.example",
+				"port":     8388,
+				"password": "synthetic-password#BLACKSTONE",
+			},
+			want: C.Blackstone,
+		},
+		{
+			// snell + psk ending in #oix is the OIX variant.
+			name: "snell oix",
+			mapping: map[string]any{
+				"name":   "OIX fixture",
+				"type":   "snell",
+				"server": "node.example",
+				"port":   8388,
+				"psk":    "synthetic-psk#oix",
+			},
+			want: C.OIX,
+		},
+		{
+			// vless + uuid ending in #x365 selects the x365 request format.
+			name: "vless x365",
+			mapping: map[string]any{
+				"name":   "X365 fixture",
+				"type":   "vless",
+				"server": "node.example",
+				"port":   443,
+				"uuid":   "00112233-4455-6677-8899-aabbccddeeff#x365",
+			},
+			want: C.X365,
+		},
+		{
+			// vless + uuid ending in #juzi adds the 8 byte HMAC tag; the tag of
+			// this fixture uuid is cadf5ab2d76ecb6c.
+			name: "vless juzi",
+			mapping: map[string]any{
+				"name":   "Juzi fixture",
+				"type":   "vless",
+				"server": "node.example",
+				"port":   443,
+				"uuid":   "6ac24745-6118-1ce8-57da-1aab6a9b7b56#juzi",
+			},
+			want: C.Juzi,
+		},
+		{
+			// vless + uuid ending in #pure replaces the request entirely; a Pure
+			// node is TLS WebSocket only.
+			name: "vless pure",
+			mapping: map[string]any{
+				"name":    "Pure fixture",
+				"type":    "vless",
+				"server":  "node.example",
+				"port":    443,
+				"uuid":    "00112233-4455-6677-8899-aabbccddeeff#pure",
+				"tls":     true,
+				"network": "ws",
+			},
+			want: C.Pure,
+		},
+		{
+			// A node without a marker keeps the base protocol identity.
+			name: "plain ss",
+			mapping: map[string]any{
+				"name":     "Plain ss fixture",
+				"type":     "ss",
+				"server":   "node.example",
+				"port":     8388,
+				"password": "ordinary-password",
+				"cipher":   "aes-128-gcm",
+			},
+			want: C.Shadowsocks,
+		},
+		{
+			name: "plain snell",
+			mapping: map[string]any{
+				"name":   "Plain snell fixture",
+				"type":   "snell",
+				"server": "node.example",
+				"port":   8388,
+				"psk":    "ordinary-psk",
+			},
+			want: C.Snell,
+		},
+		{
+			name: "plain vless",
+			mapping: map[string]any{
+				"name":   "Plain vless fixture",
+				"type":   "vless",
+				"server": "node.example",
+				"port":   443,
+				"uuid":   "00112233-4455-6677-8899-aabbccddeeff",
+			},
+			want: C.Vless,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy, err := ParseProxy(tc.mapping)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer proxy.Close()
+			if got := proxy.Type(); got != tc.want {
+				t.Fatalf("type = %v, want %v", got, tc.want)
+			}
+			raw, err := proxy.MarshalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantJSON := `"type":"` + tc.want.String() + `"`
+			if !strings.Contains(string(raw), wantJSON) {
+				t.Fatalf("API identity = %s, want %s", raw, wantJSON)
+			}
+		})
+	}
+}

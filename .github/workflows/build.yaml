@@ -279,10 +279,15 @@ jobs:
           ls -l dist/*.apk
 
       # Fail closed: a lane that fell back to debug signing must never publish.
+      # Compares the signer cert's SHA-256 fingerprint (not the DN text, whose
+      # field order differs between apksigner/keytool output styles).
       - name: Verify APK Signing (Android)
         if: matrix.platform == 'android'
         shell: bash
+        env:
+          EXPECTED_CERT_SHA256: a6520a36dbf79bb6a35c6921a3ae6009097d11cedf746fa2d8d5deada96d6fee
         run: |
+          set -euo pipefail
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           APKSIGNER=$(ls -d "$SDK"/build-tools/*/apksigner | sort -V | tail -1)
           echo "using $APKSIGNER"
@@ -294,8 +299,11 @@ jobs:
           fi
           for f in "${apks[@]}"; do
             echo "== $f"
-            "$APKSIGNER" verify --print-certs "$f"
-            if ! "$APKSIGNER" verify --print-certs "$f" | grep -q 'certificate DN: CN=feebox'; then
+            "$APKSIGNER" verify --print-certs "$f" | tee /tmp/certs.txt
+            fp=$(sed -n 's/.*certificate SHA-256 digest: //p' /tmp/certs.txt | head -1 | tr 'A-F' 'a-f')
+            echo "signer sha256=$fp expected=$EXPECTED_CERT_SHA256"
+            sha256sum "$f"
+            if [ "$fp" != "$EXPECTED_CERT_SHA256" ]; then
               echo "::error::$f is NOT signed with the feebox release cert (debug fallback?)"
               exit 1
             fi

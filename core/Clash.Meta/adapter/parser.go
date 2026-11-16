@@ -56,6 +56,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 				if cipher, _ := mapping["cipher"].(string); cipher == "" {
 					mapping["cipher"] = defaultBlackstoneCipher
 				}
+				if cipher, _ := mapping["cipher"].(string); !outbound.SupportsBlackstoneCipher(cipher) {
+					// The classic AEAD family has no blackstone wire; the marker
+					// would end up in the key and the server would drop the node
+					// with no local error.
+					err = fmt.Errorf("blackstone ss node requires a 2022-blake3-* or stream cipher, got %q", cipher)
+					break
+				}
 				log.Debugln("[SS](%v) blackstone-over-ss node", mapping["name"])
 			}
 		}

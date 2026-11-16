@@ -73,3 +73,17 @@ func TestParsePlainSSUnaffected(t *testing.T) {
 		t.Fatal("plain ss node without cipher unexpectedly loaded")
 	}
 }
+
+func TestParseBlackstoneSSRejectsClassicAEADCipher(t *testing.T) {
+	_, err := ParseProxy(map[string]any{
+		"name":     "blackstone fixture",
+		"type":     "ss",
+		"server":   "node.example",
+		"port":     8388,
+		"password": "synthetic-password#BLACKSTONE",
+		"cipher":   "aes-128-gcm",
+	})
+	if err == nil || !strings.Contains(err.Error(), "2022-blake3-* or stream cipher") {
+		t.Fatalf("ParseProxy() error = %v, want a blackstone cipher error", err)
+	}
+}

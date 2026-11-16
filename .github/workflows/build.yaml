@@ -24,17 +24,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Android (probe: single arm64 lane while wiring up signing) ---
-          - platform: android
-            os: ubuntu-24.04
-            arch: arm64
-          # --- Desktop lanes (re-enabled once the android probe is green) ---
-          # - platform: windows
-          #   os: windows-2022
-          #   arch: amd64
-          # - platform: linux
-          #   os: ubuntu-22.04
-          #   arch: amd64
+          # --- Desktop lanes: r3 packaging line (kernel identity fix aa87c680) ---
+          # The android probe lane stays on dev/v1.19.8; this branch only builds
+          # the Windows installer so the r3 artifact has a fixable head.
+          - platform: windows
+            os: windows-2022
+            arch: amd64
+          - platform: linux
+            os: ubuntu-22.04
+            arch: amd64
+          # - platform: android
+          #   os: ubuntu-24.04
+          #   arch: arm64
 
     steps:
       - name: Checkout

@@ -6,7 +6,13 @@ import (
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/common/structure"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
+	shadowsockscipher "github.com/metacubex/sing-shadowsocks2/cipher"
 )
+
+// defaultBlackstoneCipher is the cipher the vendor client assumes for a
+// blackstone-over-SS node that carries no cipher ("os" in its API).
+const defaultBlackstoneCipher = "aes-128-ctr"
 
 func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "proxy", WeaklyTypedInput: true, KeyReplacer: structure.DefaultKeyReplacer})
@@ -35,6 +41,24 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	)
 	switch proxyType {
 	case "ss":
+		// A #BLACKSTONE password is the vendor's blackstone-over-SS variant: the
+		// cipher registry in the sing-shadowsocks2 fork strips the marker and
+		// changes the handshake. Nodes pasted from a vendor subscription often
+		// omit the cipher (the API calls it "os"); the vendor client defaults it
+		// to aes-128-ctr, so do the same before the decoder rejects the node for
+		// a missing required field.
+		if password, ok := mapping["password"].(string); ok {
+			if clean, blackstone := shadowsockscipher.ParseBlackstonePassword(password); blackstone {
+				if clean == "" {
+					err = fmt.Errorf("blackstone ss node has an empty password")
+					break
+				}
+				if cipher, _ := mapping["cipher"].(string); cipher == "" {
+					mapping["cipher"] = defaultBlackstoneCipher
+				}
+				log.Debugln("[SS](%v) blackstone-over-ss node", mapping["name"])
+			}
+		}
 		ssOption := &outbound.ShadowSocksOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, ssOption)
 		if err != nil {

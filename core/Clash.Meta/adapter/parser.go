@@ -130,16 +130,20 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		}
 		// A bare `type: trojan` whose password carries the #fastup marker is the
 		// old spelling of the Fastup variant, so report the vendor identity and
-		// not Trojan: the UI maps it to FastUP. The node must also run inside an
+		// not Trojan: the UI maps it to FastUP. The node normally runs inside an
 		// h2mux session; the adapter forces sing-mux with the protocol the
-		// vendor client uses.
+		// vendor client uses unless the node opts out (see fastupMuxOptedOut).
 		if outbound.IsFastupTrojanPassword(trojanOption.Password) {
 			trojanAdapter.SetAdapterType(C.Fastup)
-			proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
-				Enabled:  true,
-				Protocol: "h2mux",
-			}, trojanAdapter)
-			forcedFastupMux = err == nil
+			if fastupMuxOptedOut(mapping) {
+				proxy = trojanAdapter
+			} else {
+				proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
+					Enabled:  true,
+					Protocol: "h2mux",
+				}, trojanAdapter)
+				forcedFastupMux = err == nil
+			}
 		} else {
 			proxy = trojanAdapter
 		}
@@ -147,7 +151,9 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		// `type: fastup` is the vendor's own name for the trojan wire: the
 		// #fastup password derivation plus a forced h2mux session. The marker
 		// may be omitted because the type implies it; the plain `trojan` case
-		// above keeps accepting the old `password: ...#fastup` spelling.
+		// above keeps accepting the old `password: ...#fastup` spelling. The
+		// mux can be opted out per node (see fastupMuxOptedOut), the password
+		// derivation stays either way because it belongs to the wire, not mux.
 		trojanOption := &outbound.TrojanOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, trojanOption)
 		if err != nil {
@@ -160,11 +166,15 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		fastupAdapter.SetAdapterType(C.Fastup)
-		proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
-			Enabled:  true,
-			Protocol: "h2mux",
-		}, fastupAdapter)
-		forcedFastupMux = err == nil
+		if fastupMuxOptedOut(mapping) {
+			proxy = fastupAdapter
+		} else {
+			proxy, err = outbound.NewSingMux(outbound.SingMuxOption{
+				Enabled:  true,
+				Protocol: "h2mux",
+			}, fastupAdapter)
+			forcedFastupMux = err == nil
+		}
 	case "hysteria":
 		hyOption := &outbound.HysteriaOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, hyOption)
@@ -404,6 +414,28 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		return outbound.NewXHttpProxyWrapper(built, dynamicXhttp), nil
 	}
 	return built, nil
+}
+
+// fastupMuxOptedOut reports whether a Fastup node explicitly asks for the
+// plain trojan wire instead of the vendor's forced h2mux session. The canonical
+// mihomo spelling is a disabled per-proxy `smux` block; `mux: false` is accepted
+// as a Fastup-only shorthand because the variant otherwise hard-wires mux and
+// there is no other way to turn it off. A bare `smux: false` is honoured too:
+// the API serialises ProxyInfo.SMUX as a bool under that key, so a node that was
+// round-tripped through the UI keeps the opt-out. Telegram/MTProto is the known
+// victim of that mux on some servers, hence the escape hatch.
+func fastupMuxOptedOut(mapping map[string]any) bool {
+	if mux, ok := mapping["mux"].(bool); ok && !mux {
+		return true
+	}
+	switch smuxValue := mapping["smux"].(type) {
+	case bool:
+		return !smuxValue
+	case map[string]any:
+		enabled, ok := smuxValue["enabled"].(bool)
+		return ok && !enabled
+	}
+	return false
 }
 
 type proxyOption struct {

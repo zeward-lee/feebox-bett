@@ -234,7 +234,7 @@ class ProxyCard extends StatelessWidget {
                   Expanded(
                     child: Align(
                       alignment: Alignment.centerLeft,
-                      child: _ProxyMetaTag(proxy.type),
+                      child: _ProxyMetaTag(proxyTypeDisplayName(proxy.type)),
                     ),
                   ),
                   delayText,
@@ -256,7 +256,7 @@ class ProxyCard extends StatelessWidget {
             flex: 1,
             child: TooltipText(
               text: Text(
-                proxy.type,
+                proxyTypeDisplayName(proxy.type),
                 style: bodySmallStyle?.copyWith(
                   overflow: TextOverflow.ellipsis,
                   color: bodySmallStyle.color?.opacity80,

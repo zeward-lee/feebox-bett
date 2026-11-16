@@ -2990,7 +2990,7 @@ class _OutboundProxyCard extends StatelessWidget {
                         children: [
                           Flexible(
                             child: EmojiText(
-                              proxy.type,
+                              proxyTypeDisplayName(proxy.type),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: textTheme.labelSmall?.copyWith(

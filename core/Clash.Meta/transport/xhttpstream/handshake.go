@@ -33,10 +33,7 @@ const (
 	maxPadScan = 10
 )
 
-var (
-	errPreambleNotFound = errors.New("xhttp: server preamble has no IV length marker")
-	errPreambleTooLarge = errors.New("xhttp: server preamble is longer than the scan budget")
-)
+var errPreambleTooLarge = errors.New("xhttp: server preamble is longer than the scan budget")
 
 // resolveServerPreamble consumes the bytes between the echoed token and the IV
 // length byte and returns a reader positioned right after the IV length byte

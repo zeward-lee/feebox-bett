@@ -1,6 +1,8 @@
 package vless
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -21,6 +23,7 @@ type Conn struct {
 	addons   *Addons
 	received bool
 	sent     bool
+	isJuzi   bool
 }
 
 func (vc *Conn) Read(b []byte) (int, error) {
@@ -78,7 +81,10 @@ func (vc *Conn) sendRequest(p []byte) (err error) {
 
 	requestLen := 1  // protocol version
 	requestLen += 16 // UUID
-	requestLen += 1  // addons length
+	if vc.isJuzi {
+		requestLen += 8 // Juzi authentication tag
+	}
+	requestLen += 1 // addons length
 	requestLen += len(addonsBytes)
 	requestLen += 1 // command
 	if !vc.dst.Mux {
@@ -94,6 +100,16 @@ func (vc *Conn) sendRequest(p []byte) (err error) {
 	buf.Must(
 		buffer.WriteByte(Version),              // protocol version
 		buf.Error(buffer.Write(vc.id.Bytes())), // 16 bytes of uuid
+	)
+	if vc.isJuzi {
+		// Juzi authenticates the fixed request prefix: the first 8 bytes of
+		// HMAC-SHA256("hello_pidun", version || uuid).
+		mac := hmac.New(sha256.New, []byte("hello_pidun"))
+		_, _ = mac.Write([]byte{Version})
+		_, _ = mac.Write(vc.id[:])
+		buf.Must(buf.Error(buffer.Write(mac.Sum(nil)[:8])))
+	}
+	buf.Must(
 		buffer.WriteByte(byte(len(addonsBytes))),
 		buf.Error(buffer.Write(addonsBytes)),
 	)
@@ -162,6 +178,7 @@ func newConn(conn net.Conn, client *Client, dst *DstAddr) (net.Conn, error) {
 		id:           client.uuid,
 		addons:       client.Addons,
 		dst:          dst,
+		isJuzi:       client.mode == ModeJuzi,
 	}
 
 	if client.Addons != nil {

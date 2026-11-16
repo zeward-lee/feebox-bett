@@ -44,23 +44,47 @@ type DstAddr struct {
 type Client struct {
 	uuid   uuid.UUID
 	Addons *Addons
+	// mode selects the private wire format. ModeStandard is the upstream vless
+	// request; ModeJuzi adds an HMAC tag to it; ModePure replaces it entirely.
+	mode PrivateMode
 }
 
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
+	if c.mode == ModePure {
+		return c.dialPure(conn, dst)
+	}
 	return newConn(conn, c, dst)
 }
 
 func (c *Client) PacketConn(conn net.Conn, rAddr net.Addr) net.PacketConn {
+	if c.mode == ModePure {
+		return &purePacketReject{}
+	}
 	return &PacketConn{conn, rAddr}
 }
 
 // NewClient return Client instance
+//
+// A UUID may carry a private protocol marker as its suffix (#juzi, #pure). The
+// marker is stripped here and recorded as the client mode, so one node string
+// drives one wire format.
 func NewClient(uuidStr string, addons *Addons) (*Client, error) {
-	uid := utils.UUIDMap(uuidStr)
-
+	cleanID, mode, err := parsePrivateUUID(uuidStr)
+	if err != nil {
+		return nil, err
+	}
+	if mode == ModePure {
+		key, _, err := pureIdentity(uuidStr)
+		if err != nil {
+			return nil, err
+		}
+		return &Client{uuid: key, Addons: addons, mode: mode}, nil
+	}
+	uid := utils.UUIDMap(cleanID)
 	return &Client{
 		uuid:   uid,
 		Addons: addons,
+		mode:   mode,
 	}, nil
 }

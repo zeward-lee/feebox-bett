@@ -53,6 +53,8 @@ type Vless struct {
 	restlsConfig    *restls.Config
 	jlsConfig       *jls.Config
 	realityConfig   *tlsC.RealityConfig
+	// pure marks a Pure node, which pins TLS 1.3 and has no UDP path.
+	pure bool
 }
 
 type VlessOption struct {
@@ -201,12 +203,20 @@ func (v *Vless) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 				}
 			} else {
 				wsOpts.TLS = true
+				tlsConfig := &tls.Config{
+					ServerName:         serverName,
+					InsecureSkipVerify: v.option.SkipCertVerify,
+					NextProtos:         []string{"http/1.1"},
+				}
+				if v.pure {
+					// The Pure server only speaks TLS 1.3; pinning both ends keeps a
+					// downgrading middlebox from negotiating 1.2 and hanging the
+					// handshake after the request is already written.
+					tlsConfig.MinVersion = tls.VersionTLS13
+					tlsConfig.MaxVersion = tls.VersionTLS13
+				}
 				wsOpts.TLSConfig, err = ca.GetTLSConfig(ca.Option{
-					TLSConfig: &tls.Config{
-						ServerName:         serverName,
-						InsecureSkipVerify: v.option.SkipCertVerify,
-						NextProtos:         []string{"http/1.1"},
-					},
+					TLSConfig:      tlsConfig,
 					Fingerprint:    v.option.Fingerprint,
 					NameCertVerify: v.option.NameCertVerify,
 					Certificate:    v.option.Certificate,
@@ -459,7 +469,46 @@ func parseVlessAddr(metadata *C.Metadata, xudp bool) *vless.DstAddr {
 	}
 }
 
+// configurePureVless validates the Pure dialect and pins the transport it
+// requires: TLS 1.3 over WebSocket with ALPN http/1.1 and the fixed /websocket
+// path. Every option that would change the outer request is rejected instead of
+// being silently ignored, because the Pure server matches them exactly.
+func configurePureVless(option *VlessOption) (bool, error) {
+	lower := strings.ToLower(option.UUID)
+	if !strings.Contains(lower, "#pure") {
+		return false, nil
+	}
+	if !strings.HasSuffix(lower, "#pure") {
+		return true, errors.New("Pure: invalid or mixed suffix")
+	}
+	if option.Flow != "" || (option.Encryption != "" && option.Encryption != "none") || option.UDP || option.PacketAddr || option.XUDP || option.PacketEncoding != "" {
+		return true, errors.New("Pure: flow, encryption, UDP/XUDP and packet encoding unsupported")
+	}
+	if !option.TLS || option.Network != "ws" {
+		return true, errors.New("Pure: requires TLS WebSocket transport")
+	}
+	if option.ClientFingerprint != "" || option.ECHOpts.Enable || option.RealityOpts.PublicKey != "" || option.ShadowTLSOpts.Password != "" || option.ShadowTLSOpts.Version != 0 || option.RestlsOpts.Password != "" || option.RestlsOpts.VersionHint != "" || option.RestlsOpts.RestlsScript != "" || option.JLSOpts.Username != "" || option.JLSOpts.Password != "" {
+		return true, errors.New("Pure: Reality, uTLS, ECH and alternate TLS engines unsupported")
+	}
+	if len(option.ALPN) > 0 && (len(option.ALPN) != 1 || option.ALPN[0] != "http/1.1") {
+		return true, errors.New("Pure: requires ALPN http/1.1")
+	}
+	if option.WSOpts.MaxEarlyData != 0 || option.WSOpts.EarlyDataHeaderName != "" || option.WSOpts.V2rayHttpUpgrade || option.WSOpts.V2rayHttpUpgradeFastOpen || len(option.WSOpts.Headers) != 0 || len(option.WSHeaders) != 0 || (option.WSOpts.Path != "" && option.WSOpts.Path != "/websocket") {
+		return true, errors.New("Pure: early data and custom WebSocket options unsupported")
+	}
+	option.ALPN = []string{"http/1.1"}
+	option.WSOpts.Path = "/websocket"
+	return true, nil
+}
+
 func NewVless(option VlessOption) (*Vless, error) {
+	// A subscription may carry surrounding whitespace on the uuid.
+	option.UUID = strings.TrimSpace(option.UUID)
+	pure, err := configurePureVless(&option)
+	if err != nil {
+		return nil, err
+	}
+
 	var addons *vless.Addons
 	if len(option.Flow) >= 16 {
 		option.Flow = option.Flow[:16]
@@ -476,7 +525,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 		option.PacketAddr = true
 		option.XUDP = false
 	default: // https://github.com/XTLS/Xray-core/pull/1567#issuecomment-1407305458
-		if !option.PacketAddr {
+		if !option.PacketAddr && !pure {
 			option.XUDP = true
 		}
 	}
@@ -495,8 +544,8 @@ func NewVless(option VlessOption) (*Vless, error) {
 			Addr:         net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
 			Type:         C.Vless,
 			ProviderName: option.ProviderName,
-			UDP:          option.UDP,
-			XUDP:         option.XUDP,
+			UDP:          option.UDP && !pure,
+			XUDP:         option.XUDP && !pure,
 			TFO:          option.TFO,
 			MPTCP:        option.MPTCP,
 			Interface:    option.Interface,
@@ -505,6 +554,7 @@ func NewVless(option VlessOption) (*Vless, error) {
 		}),
 		client: client,
 		option: &option,
+		pure:   pure,
 	}
 	v.dialer = option.NewDialer(v.DialOptions())
 

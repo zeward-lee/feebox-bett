@@ -59,6 +59,7 @@ const (
 	Miu
 	Ninja
 	Oppa
+	XHttp
 )
 
 const (
@@ -255,6 +256,8 @@ func (at AdapterType) String() string {
 		return "Ninja"
 	case Oppa:
 		return "Oppa"
+	case XHttp:
+		return "XHttp"
 	case Relay:
 		return "Relay"
 	case Selector:

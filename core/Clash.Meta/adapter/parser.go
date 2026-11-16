@@ -29,6 +29,9 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		// trojan proxy in sing-mux, so a user `smux:` block must not wrap it a
 		// second time.
 		forcedFastupMux bool
+		// dynamicXhttp keeps the adapter of a dynamic xhttp node so it can be
+		// wrapped for URL testing after the generic wrapping below.
+		dynamicXhttp *outbound.XHttp
 	)
 	switch proxyType {
 	case "ss":
@@ -264,6 +267,18 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewNinja(*ninjaOption)
+	case "xhttp":
+		xhttpOption := &outbound.XHttpOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, xhttpOption)
+		if err != nil {
+			break
+		}
+		var xhttpAdapter *outbound.XHttp
+		xhttpAdapter, err = outbound.NewXHttp(*xhttpOption)
+		if err == nil && xhttpAdapter.IsDynamic() {
+			dynamicXhttp = xhttpAdapter
+		}
+		proxy = xhttpAdapter
 	default:
 		return nil, fmt.Errorf("unsupport proxy type: %s", proxyType)
 	}
@@ -287,7 +302,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
-	return NewProxy(proxy), nil
+	built := NewProxy(proxy)
+	// A dynamic xhttp node resolves its real server at first use, so its URL
+	// test pings the configured address instead of spending an API round trip.
+	if dynamicXhttp != nil {
+		return outbound.NewXHttpProxyWrapper(built, dynamicXhttp), nil
+	}
+	return built, nil
 }
 
 type proxyOption struct {

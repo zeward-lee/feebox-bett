@@ -19,6 +19,7 @@ import (
 	v2rayObfs "github.com/metacubex/mihomo/transport/v2ray-plugin"
 
 	shadowsocks "github.com/metacubex/sing-shadowsocks2"
+	shadowsockscipher "github.com/metacubex/sing-shadowsocks2/cipher"
 	"github.com/metacubex/sing/common/bufio"
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/sing/common/uot"
@@ -298,6 +299,22 @@ func (ss *ShadowSocks) Close() error {
 	return nil
 }
 
+// ssIdentity reports the vendor identity of an ss node from the marker in its
+// password. Two vendors reuse the shadowsocks wire under their own name:
+// ViewTurbo (token in the password, "#VT") and blackstone ("#BLACKSTONE"). The
+// sing-shadowsocks2 fork already keys the wire off these markers, so reuse the
+// same predicates and publish the vendor name instead of Shadowsocks; a node
+// without a marker keeps Shadowsocks unchanged.
+func ssIdentity(password string) C.AdapterType {
+	if _, viewTurbo := shadowsockscipher.ParseViewTurboPassword(password); viewTurbo {
+		return C.ViewTurbo
+	}
+	if _, blackstone := shadowsockscipher.ParseBlackstonePassword(password); blackstone {
+		return C.Blackstone
+	}
+	return C.Shadowsocks
+}
+
 func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 	method, err := shadowsocks.CreateMethod(option.Cipher, shadowsocks.MethodOptions{
@@ -520,6 +537,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		jlsConfig:       jlsConfig,
 		kcptunClient:    kcptunClient,
 	}
+	outbound.SetAdapterType(ssIdentity(option.Password))
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	return outbound, nil
 }

@@ -8,7 +8,8 @@ import (
 // TestParseBlackstoneSSDefaultsCipher pins the blackstone-over-SS recognition:
 // the vendor API calls these nodes "os" and leaves the cipher empty, and the
 // vendor client assumes aes-128-ctr. Without the default the node would fail to
-// load with "unknown method: ".
+// load with "unknown method: ". The vendor identity (Blackstone, shown as 黑石
+// in the UI) is published too.
 func TestParseBlackstoneSSDefaultsCipher(t *testing.T) {
 	proxy, err := ParseProxy(map[string]any{
 		"name":     "blackstone fixture",
@@ -21,8 +22,8 @@ func TestParseBlackstoneSSDefaultsCipher(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer proxy.Close()
-	if got := proxy.Type().String(); got != "Shadowsocks" {
-		t.Fatalf("type = %q, want Shadowsocks", got)
+	if got := proxy.Type().String(); got != "Blackstone" {
+		t.Fatalf("type = %q, want Blackstone", got)
 	}
 }
 
@@ -39,8 +40,8 @@ func TestParseBlackstoneSSKeepsExplicitCipher(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer proxy.Close()
-	if got := proxy.Type().String(); got != "Shadowsocks" {
-		t.Fatalf("type = %q, want Shadowsocks", got)
+	if got := proxy.Type().String(); got != "Blackstone" {
+		t.Fatalf("type = %q, want Blackstone", got)
 	}
 }
 

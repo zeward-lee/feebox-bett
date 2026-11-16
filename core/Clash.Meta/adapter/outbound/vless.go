@@ -557,6 +557,18 @@ func NewVless(option VlessOption) (*Vless, error) {
 		pure:   pure,
 	}
 	v.dialer = option.NewDialer(v.DialOptions())
+	// The private vless variants carry their own name in the uuid marker
+	// (#x365, #juzi, #pure) and NewClient already stripped it to pick the wire,
+	// so publish the vendor identity from the same decision: the API and the UI
+	// show the protocol's own name instead of Vless. A plain node keeps Vless.
+	switch client.PrivateMode() {
+	case vless.ModeX365:
+		v.SetAdapterType(C.X365)
+	case vless.ModeJuzi:
+		v.SetAdapterType(C.Juzi)
+	case vless.ModePure:
+		v.SetAdapterType(C.Pure)
+	}
 
 	v.encryption, err = encryption.NewClient(option.Encryption)
 	if err != nil {

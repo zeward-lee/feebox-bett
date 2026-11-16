@@ -9,6 +9,11 @@
 ///
 /// 未收录的协议（Vless / Trojan / Hysteria2 / AnyTLS …）原样返回，行为与改造
 /// 前完全一致。
+///
+/// 借壳协议（自己借别人的线路，但有专有名词）由内核按标记自报家门：ss 的
+/// `#VT` → ViewTurbo、ss 的 `#BLACKSTONE` → Blackstone、snell 的 `#oix` → OIX、
+/// vless 的 `#x365` / `#juzi` / `#pure` → X365 / Juzi / Pure。内核返回的
+/// `AdapterType.String()` 已是专有名词，这里只需登记它的展示写法。
 const Map<String, String> proxyTypeDisplayNames = {
   'x365': 'X365',
   'miu': 'MIU',
@@ -17,6 +22,11 @@ const Map<String, String> proxyTypeDisplayNames = {
   'fastup': 'FastUP',
   'xhttp': '黑石',
   'shanlian': '闪连',
+  'viewturbo': 'ViewTurbo',
+  'blackstone': '黑石',
+  'oix': 'OIX',
+  'juzi': 'Juzi',
+  'pure': 'Pure',
 };
 
 /// 把协议 type 转成展示用名字；未收录时原样返回。

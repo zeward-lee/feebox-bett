@@ -86,3 +86,8 @@ app.*.map.json
 /assets/data/zash.zip
 /assets/data/BundleMRS.7z
 /test/private/
+
+# Android release signing material (never commit passwords or the keystore)
+/android/local.properties
+*.jks
+*.p12

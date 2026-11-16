@@ -24,12 +24,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows
-            os: windows-2022
-            arch: amd64
-          - platform: linux
-            os: ubuntu-22.04
-            arch: amd64
+          # --- Android (probe: single arm64 lane while wiring up signing) ---
+          - platform: android
+            os: ubuntu-24.04
+            arch: arm64
+          # --- Desktop lanes (re-enabled once the android probe is green) ---
+          # - platform: windows
+          #   os: windows-2022
+          #   arch: amd64
+          # - platform: linux
+          #   os: ubuntu-22.04
+          #   arch: amd64
 
     steps:
       - name: Checkout
@@ -37,11 +42,55 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Android signing material: keystore + local.properties.
+      # Placed as early as possible so a bad secret fails the lane in seconds.
+      # android/app/build.gradle.kts reads android/local.properties (rootProject)
+      # and expects the keystore at android/app/keystore.jks.
+      # NOTE: flutter's updateLocalProperties() merges into local.properties and
+      # never drops unknown keys, so these survive `flutter build apk`.
+      - name: Setup Android Signing
+        if: matrix.platform == 'android'
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::secret KEYSTORE is empty"
+            exit 1
+          fi
+          mkdir -p android/app
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > android/app/keystore.jks
+          {
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyPassword=$KEY_PASSWORD"
+          } >> android/local.properties
+          ls -l android/app/keystore.jks
+          echo "local.properties keys: $(grep -c 'Password=\|keyAlias=' android/local.properties)"
+
+      - name: Setup Java (Android)
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: 'gradle'
+
       - name: Setup Rust (Windows)
         if: matrix.platform == 'windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Setup Rust (Android)
+        if: matrix.platform == 'android'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
 
       - name: Setup Rust (Linux)
         if: matrix.platform == 'linux'
@@ -69,6 +118,35 @@ jobs:
             core/go.sum
             core/Clash.Meta/go.sum
 
+      - name: Setup Android NDK
+        if: matrix.platform == 'android'
+        shell: bash
+        run: |
+          NDK_VERSION="28.2.13676358"   # must match android/app + android/core build.gradle.kts
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?android sdk root not set}}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" >/dev/null 2>&1 || true
+          if [ ! -d "$SDK/ndk/${NDK_VERSION}" ]; then
+            echo "::error::NDK ${NDK_VERSION} missing under $SDK/ndk"
+            exit 1
+          fi
+          echo "ANDROID_NDK=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Configure Cargo for Android
+        if: matrix.platform == 'android'
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          [target.armv7-linux-androideabi]
+          linker = "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang"
+          [target.x86_64-linux-android]
+          linker = "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+          [target.i686-linux-android]
+          linker = "${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang"
+          EOF
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -80,6 +158,14 @@ jobs:
       - name: Clear Pub Cache Credentials
         shell: bash
         run: rm -f ~/.pub-cache/credentials.json 2>/dev/null || true
+
+      # Drops android/.gradle + build/ + .dart_tool so a stale cache can never
+      # mask a gradle/AGP problem. flutter clean does NOT touch local.properties
+      # (only ephemeral dirs), so the signing keys survive.
+      - name: Clean Gradle (Android)
+        if: matrix.platform == 'android'
+        shell: bash
+        run: flutter clean
 
       - name: Patch for Windows
         if: matrix.platform == 'windows'
@@ -180,6 +266,50 @@ jobs:
           archive: false
           overwrite: true
           if-no-files-found: warn
+
+      - name: Build Bettbox (Android)
+        if: matrix.platform == 'android'
+        shell: bash
+        env:
+          GRADLE_OPTS: -Dorg.gradle.vfs.watch=false
+        run: |
+          flutter pub get
+          dart run build_runner build
+          dart setup.dart android --arch ${{ matrix.arch }} ${{ env.IS_STABLE == 'true' && '--env stable' || '' }} ${{ matrix.lite == true && '--lite' || '' }}
+          ls -l dist/*.apk
+
+      # Fail closed: a lane that fell back to debug signing must never publish.
+      - name: Verify APK Signing (Android)
+        if: matrix.platform == 'android'
+        shell: bash
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          APKSIGNER=$(ls -d "$SDK"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "using $APKSIGNER"
+          shopt -s nullglob
+          apks=(dist/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "::error::no apk produced in dist/"
+            exit 1
+          fi
+          for f in "${apks[@]}"; do
+            echo "== $f"
+            "$APKSIGNER" verify --print-certs "$f"
+            if ! "$APKSIGNER" verify --print-certs "$f" | grep -q 'certificate DN: CN=feebox'; then
+              echo "::error::$f is NOT signed with the feebox release cert (debug fallback?)"
+              exit 1
+            fi
+          done
+
+      - name: Upload Android Artifacts
+        if: matrix.platform == 'android'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Bettbox-android-${{ matrix.arch }}${{ matrix.lite == true && '-lite' || '' }}
+          path: ./dist/*.apk
+          archive: false
+          overwrite: true
+          if-no-files-found: error
 
       - name: Upload Linux Artifacts
         if: matrix.platform == 'linux'

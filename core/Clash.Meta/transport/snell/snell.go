@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sync"
 
+	"github.com/metacubex/blake3"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/transport/shadowsocks/shadowaead"
 	"github.com/metacubex/mihomo/transport/socks5"
@@ -39,6 +40,15 @@ const (
 	CommandError  byte = 2
 
 	Version byte = 1
+)
+
+// The OIX enhancement fronts the v4 record layer with an identity header so a
+// server can bind the session to the psk without a second round trip. The v2
+// variant additionally authenticates the exporter of the TLS session the
+// snell stream runs inside (see identity.go).
+const (
+	IdentityHeaderLength = 16
+	identityWireMagic    = "DLSNID01"
 )
 
 var endSignal = []byte{}
@@ -102,6 +112,14 @@ func WriteHeader(conn net.Conn, host string, port uint, version int) error {
 }
 
 func WriteHeaderWithReuse(conn net.Conn, host string, port uint, version int, reuse bool) error {
+	// Reject an invalid destination before a byte is written: a rejected header
+	// must not leave a half-written request on the wire.
+	if len(host) == 0 || len(host) > 255 {
+		return fmt.Errorf("snell host length must be between 1 and 255 bytes: %d", len(host))
+	}
+	if port == 0 || port > 65535 {
+		return fmt.Errorf("snell port out of range: %d", port)
+	}
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	buf.WriteByte(Version)
@@ -154,12 +172,56 @@ func HalfClose(conn net.Conn) error {
 	return nil
 }
 
+// IdentityHeaderFromPSK derives the v1 identity header of a node: the first 16
+// bytes of blake3-512(psk).
+func IdentityHeaderFromPSK(psk []byte) []byte {
+	hash := blake3.Sum512(psk)
+	return append([]byte(nil), hash[:IdentityHeaderLength]...)
+}
+
+// Warmup sends a ping through an established stream and expects the pong. The
+// identity transport keeps a v4 session reusable; a plain upstream server closes
+// an idle session, so only identity sessions are warmed up.
+func (s *Snell) Warmup() error {
+	if _, err := s.Conn.Write([]byte{Version, CommandPing, 0}); err != nil {
+		return err
+	}
+	var reply [1]byte
+	if _, err := io.ReadFull(s.Conn, reply[:]); err != nil {
+		return err
+	}
+	if reply[0] != CommandPong {
+		return fmt.Errorf("unexpected Snell warmup reply: %d", reply[0])
+	}
+	return nil
+}
+
+// StreamConnWithIdentity is StreamConn with the v1 identity header (blake3 of
+// the psk) written in front of the first v4 record.
+func StreamConnWithIdentity(conn net.Conn, psk []byte, version int) *Snell {
+	return streamConn(conn, psk, version, IdentityHeaderFromPSK(psk))
+}
+
+// StreamConnWithExporterIdentity is StreamConn with the v2 identity header: the
+// header and its authentication tag are bound to the exporter of the TLS
+// session the snell stream runs inside.
+func StreamConnWithExporterIdentity(conn net.Conn, psk []byte, version int, exporter []byte) *Snell {
+	if version >= Version4 {
+		return &Snell{Conn: newV4ConnWithExporterIdentity(conn, psk, exporter)}
+	}
+	return StreamConnWithIdentity(conn, psk, version)
+}
+
 func StreamConn(conn net.Conn, psk []byte, version int) *Snell {
+	return streamConn(conn, psk, version, nil)
+}
+
+func streamConn(conn net.Conn, psk []byte, version int, identity []byte) *Snell {
 	if version >= Version6 {
 		return StreamConnV6(conn, psk, V6ModeDefault)
 	}
 	if version >= Version4 {
-		return &Snell{Conn: newV4Conn(conn, psk)}
+		return &Snell{Conn: newV4ConnWithIdentity(conn, psk, identity)}
 	}
 
 	var cipher shadowaead.Cipher

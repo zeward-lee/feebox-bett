@@ -82,6 +82,9 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		if err != nil {
 			break
 		}
+		// A bool cannot tell "identity: false" from an absent key; the OIX modes
+		// reject an explicit disable, so the presence of the key is recorded.
+		_, snellOption.IdentityConfigured = mapping["identity"]
 		proxy, err = outbound.NewSnell(*snellOption)
 	case "trojan":
 		trojanOption := &outbound.TrojanOption{BasicOption: basicOption}

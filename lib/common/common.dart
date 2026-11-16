@@ -36,6 +36,7 @@ export 'print.dart';
 export 'process_icon.dart';
 export 'protocol.dart';
 export 'proxy.dart';
+export 'proxy_display_name.dart';
 export 'qr_reader.dart';
 export 'render.dart';
 export 'request.dart';

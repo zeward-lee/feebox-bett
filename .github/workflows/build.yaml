@@ -118,6 +118,19 @@ jobs:
           dart run build_runner build
           dart setup.dart windows --arch ${{ matrix.arch }} --out core-only
 
+      - name: Verify Core Protocol Markers (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $core = 'libclash/windows/BettboxCore.exe'
+          if (-not (Test-Path $core)) { Write-Error "core missing: $core"; exit 1 }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $core))
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          Write-Host ("CORE " + $core + " size=" + $bytes.Length)
+          foreach ($k in @('fastup', 'x365', 'ninja', 'oppa', 'miu')) {
+            if ($text.Contains($k)) { Write-Host "MARKER OK  : $k" } else { Write-Host "MARKER MISS: $k" }
+          }
+
       - name: Build HelperService (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -147,6 +160,15 @@ jobs:
         run: |
           dart windows/packaging/exe/package_windows.dart --arch ${{ matrix.arch }} --env ${{ env.IS_STABLE == 'true' && 'stable' || 'pre' }}
 
+      - name: Record Windows Artifact SHA256
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            Write-Host ("ARTIFACT " + $_.Name + " size=" + $_.Length + " sha256=" + $h)
+          }
+
       - name: Upload Windows Artifacts
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v7
@@ -163,8 +185,9 @@ jobs:
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v7
         with:
+          # dist/ holds 3 packages (AppImage/deb/rpm); 'archive: false' rejects
+          # multi-file uploads, so keep the default zip for this lane.
           name: Bettbox-linux-${{ matrix.arch }}
           path: ./dist/*
-          archive: false
           overwrite: true
           if-no-files-found: warn

@@ -11,6 +11,11 @@ name: ensure-private
 # 注意：schedule 只在**默认分支**（main）上生效。本文件需要存在于 main 上 cron 才会跑；
 # 在其他分支上只能靠 workflow_dispatch 触发（dispatch 时选该分支即可）。
 #
+# 注意（2026-11-16 实测）：本账号私有仓库上的 job 不会启动（计费限制，注解原文
+# "recent account payments have failed or your spending limit needs to be increased"）。
+# 这对本保险丝恰好无害——它需要在"仓库处于 public"时运行，而 public 仓库的 Actions 免费、
+# 能正常启动；仓库已经是 private 时它即便跑不起来也不需要做事。
+#
 # 与 build-flip.yaml 共用 concurrency group：翻转永不并发，不会打断正在进行的 flip。
 
 on:
@@ -82,7 +87,7 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               -d '{"visibility":"private"}')
             priv=$(api "$API" | jq -r '.private')
-            echo "attempt $i/12: PATCH private HTTP $code, private=$priv $(head -c 200 /tmp/flip.json)"
+            echo "attempt $i/12: PATCH private HTTP $code, private=$priv $(jq -r '.message // ""' /tmp/flip.json 2>/dev/null || true)"
             if [ "$code" = "200" ] && [ "$priv" = "true" ]; then ok=1; break; fi
             sleep 10
           done

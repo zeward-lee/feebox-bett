@@ -5,8 +5,16 @@ name: build-flip
 # 私有仓库跑 Actions 会消耗机时；public 仓库的 Actions 机时免费。
 # 所以：构建前把仓库临时转 public → dispatch build.yaml → 构建结束（无论成败）转回 private。
 #
-# 唯一入口：手动 dispatch **本** 工作流。不要再直接 dispatch build.yaml（那样仓库还是 private，
-# 白耗机时）。本工作流文件必须存在于被 dispatch 的那个分支上。
+# 唯一入口：手动 dispatch **本** 工作流。不要再直接 dispatch build.yaml。
+# 本工作流文件必须存在于被 dispatch 的那个分支上，且必须已在默认分支（main）注册，
+# 否则 dispatch 会 404。
+#
+# ⚠ 本账号现状（2026-11-16 实测）：**私有仓库上的 job 根本不会启动**，注解原文
+#   "The job was not started because recent account payments have failed or your
+#    spending limit needs to be increased"。也就是说本工作流自己也无法从 private 状态
+#   被启动。所以真实入口是"先用一条本地 API 调用把仓库翻成公开"，再 dispatch 本工作流：
+#       python -X utf8 <scratch>/tools/flip_dispatch.py --ref <分支>
+#   该脚本只做 flip public + dispatch 两步；翻回 private、等待、汇报全部由本工作流在服务器上完成。
 #
 # 步骤（单 job 串行）：
 #   1. flip public   —— PATCH {"visibility":"public"}，可重试（GitHub 在可见性过渡期间会回 422
@@ -66,7 +74,7 @@ jobs:
                 -H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "X-GitHub-Api-Version: 2022-11-28" | jq -r '.private')
-              echo "attempt $i/$tries: PATCH $vis HTTP $code, private=$priv $(head -c 200 /tmp/flip.json)"
+              echo "attempt $i/$tries: PATCH $vis HTTP $code, private=$priv $(jq -r '.message // ""' /tmp/flip.json 2>/dev/null || true)"
               if [ "$code" = "200" ] && [ "$priv" = "$want" ]; then
                 return 0
               fi
@@ -167,7 +175,7 @@ jobs:
                 -H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "X-GitHub-Api-Version: 2022-11-28" | jq -r '.private')
-              echo "attempt $i/$tries: PATCH $vis HTTP $code, private=$priv $(head -c 200 /tmp/flip.json)"
+              echo "attempt $i/$tries: PATCH $vis HTTP $code, private=$priv $(jq -r '.message // ""' /tmp/flip.json 2>/dev/null || true)"
               if [ "$code" = "200" ] && [ "$priv" = "$want" ]; then
                 return 0
               fi

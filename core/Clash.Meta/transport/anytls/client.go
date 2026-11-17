@@ -33,6 +33,18 @@ type ClientConfig struct {
 	Server                   M.Socksaddr
 	Dialer                   N.Dialer
 	TLSConfig                *vmess.TLSConfig
+	// SkipTLS dials the underlying transport as a plain byte stream and writes
+	// the anytls handshake (credential + padding + frames) directly into it.
+	//
+	// It is required by the vendor `transport/v2rayxhttp` (XHTTP) transport: the
+	// XHTTP stream pair already runs inside TLS (one handshake per endpoint,
+	// configured on the transport), and the vendor server expects the anytls
+	// credential as the very first bytes of the upload body. Adding a second TLS
+	// handshake there makes the server read a TLS ClientHello as the credential
+	// and never answer, which is exactly the "failed to create session: context
+	// deadline exceeded" failure the dedicated lines showed. Plain anytls nodes
+	// keep TLSConfig and this flag false.
+	SkipTLS bool
 }
 
 type Client struct {
@@ -42,6 +54,7 @@ type Client struct {
 	// deriveHexPasswordCredential) instead of sending passwordSha256.
 	hexPasswordKey []byte
 	tlsConfig      *vmess.TLSConfig
+	skipTLS        bool
 	dialer         N.Dialer
 	server         M.Socksaddr
 	sessionClient  *session.Client
@@ -136,6 +149,7 @@ func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 	c := &Client{
 		passwordSha256: password,
 		tlsConfig:      config.TLSConfig,
+		skipTLS:        config.SkipTLS,
 		dialer:         config.Dialer,
 		server:         config.Server,
 	}
@@ -165,6 +179,17 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 	conn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.server)
 	if err != nil {
 		return nil, err
+	}
+
+	// XHTTP already carries the stream inside its own TLS; layering anytls TLS on
+	// top would make the vendor server parse the ClientHello as a credential and
+	// stay silent. The handshake prefix therefore goes straight into the stream.
+	if c.skipTLS {
+		if _, err = c.writeFirstPacket(conn); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return conn, nil
 	}
 
 	tlsConn, err := vmess.StreamTLSConn(ctx, conn, c.tlsConfig)

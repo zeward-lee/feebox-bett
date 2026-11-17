@@ -143,11 +143,14 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	singDialer := proxydialer.NewSingDialer(outbound.dialer)
 	var sessionDialer singN.Dialer = singDialer
+	skipAnyTLSTLS := false
 	if option.Transport != "" {
 		// The vendor dedicated lines run anytls inside a `transport/v2rayxhttp`
 		// (XHTTP) stream pair instead of a plain TCP socket. Swap the dialer the
-		// anytls session uses; everything above it (TLS, session framing) stays
-		// byte-for-byte the same as a standard anytls node.
+		// anytls session uses. The XHTTP transport already runs inside its own TLS
+		// (one handshake per endpoint), so the anytls layer must NOT add a second
+		// one: the vendor server expects the credential as the first bytes of the
+		// upload body and reads a TLS ClientHello as a bad credential otherwise.
 		transport := strings.ToLower(strings.TrimSpace(option.Transport))
 		if transport != "xhttp" && transport != "v2rayxhttp" {
 			return nil, errors.New("anytls: unsupported transport: " + option.Transport)
@@ -158,6 +161,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		}
 		outbound.xhttp = xhttpClient
 		sessionDialer = v2rayxhttp.NewDialer(xhttpClient)
+		skipAnyTLSTLS = true
 	}
 
 	tOption := anytls.ClientConfig{
@@ -169,6 +173,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		IdleSessionTimeout:       time.Duration(option.IdleSessionTimeout) * time.Second,
 		MinIdleSession:           option.MinIdleSession,
 		DisableReuse:             option.DisableReuse,
+		SkipTLS:                  skipAnyTLSTLS,
 	}
 	echConfig, err := option.ECHOpts.Parse()
 	if err != nil {

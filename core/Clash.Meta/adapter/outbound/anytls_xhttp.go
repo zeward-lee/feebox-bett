@@ -100,8 +100,10 @@ func (o *XHTTPXmuxOptions) build() (*v2rayxhttp.XmuxOptions, error) {
 }
 
 // newXHTTPTransport builds the XHTTP client that replaces the anytls dialer.
-// The anytls TLS handshake then runs inside the XHTTP stream, exactly like the
-// vendor stack (TCP -> obfs -> TLS -> HTTP/2 streams -> anytls).
+// The XHTTP stream pair already carries TLS (the transport handshake), so the
+// anytls layer above it runs without a second TLS handshake: the credential and
+// session frames are written straight into the upload stream, exactly like the
+// vendor stack (TCP -> TLS -> HTTP/2 streams -> obfs -> anytls frames).
 func newXHTTPTransport(option *AnyTLSOption, dialer N.Dialer) (*v2rayxhttp.Client, error) {
 	opts := option.XHTTPOpts
 	mode := strings.ToLower(strings.TrimSpace(opts.Mode))

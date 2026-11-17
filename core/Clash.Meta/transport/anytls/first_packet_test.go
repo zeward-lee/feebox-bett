@@ -85,6 +85,103 @@ func TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix(t *testing.T) {
 	assertUpstreamFirstPacket(t, password, want[:])
 }
 
+// TestSkipTLSWritesHandshakeIntoPlainStream pins the vendor xhttp path: with
+// SkipTLS the dialed stream must receive the anytls prefix as the very first
+// bytes and must not contain a TLS record in front of them.
+//
+// The xhttp transport already runs inside TLS, and the vendor server reads the
+// upload body as `credential || 2B padding length || padding` directly. If the
+// anytls layer adds a second TLS handshake here, the first bytes become
+// 0x16 0x03 ... and the server never answers (production symptom: "failed to
+// create session: context deadline exceeded").
+func TestSkipTLSWritesHandshakeIntoPlainStream(t *testing.T) {
+	raw, err := hex.DecodeString(vendorHexPassword)
+	if err != nil {
+		t.Fatalf("decode vendor password: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	port, err := parsePort(portText)
+	if err != nil {
+		t.Fatalf("port: %v", err)
+	}
+	client, err := NewClient(context.Background(), ClientConfig{
+		Password:                 vendorHexPassword,
+		Server:                   M.ParseSocksaddrHostPort(host, port),
+		Dialer:                   directDialer{},
+		SkipTLS:                  true,
+		IdleSessionCheckInterval: 30 * time.Second,
+		IdleSessionTimeout:       30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	dialErr := make(chan error, 1)
+	go func() {
+		conn, err := client.createOutboundTLSConnection(context.Background())
+		if err != nil {
+			dialErr <- err
+			return
+		}
+		_ = conn.Close()
+		dialErr <- nil
+	}()
+
+	rawConn, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	defer rawConn.Close()
+	_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	plaintext := make([]byte, 0, 128)
+	buf := make([]byte, 128)
+	for len(plaintext) < firstPacketPlaintextLen {
+		n, readErr := rawConn.Read(buf)
+		plaintext = append(plaintext, buf[:n]...)
+		if readErr != nil {
+			t.Fatalf("read first packet: %v (got %d bytes)", readErr, len(plaintext))
+		}
+	}
+
+	if plaintext[0] == 0x16 && len(plaintext) > 2 && plaintext[1] == 0x03 {
+		t.Fatalf("first bytes %x look like a TLS record, want the plain anytls prefix", plaintext[:3])
+	}
+	if len(plaintext) != firstPacketPlaintextLen {
+		t.Fatalf("first packet = %d bytes (%x), want %d", len(plaintext), plaintext, firstPacketPlaintextLen)
+	}
+	if !bytes.Equal(plaintext[:hexPasswordKeySize], raw) {
+		t.Fatalf("credential key half = %x, want %x", plaintext[:hexPasswordKeySize], raw)
+	}
+	assertDerivedHexCredential(t, plaintext[:sha256.Size], raw)
+	if got := binary.BigEndian.Uint16(plaintext[sha256.Size : sha256.Size+2]); int(got) != defaultFirstPacketPadding {
+		t.Fatalf("padding length = %d, want %d", got, defaultFirstPacketPadding)
+	}
+	for i, b := range plaintext[sha256.Size+2:] {
+		if b != 0 {
+			t.Fatalf("padding byte %d = %#x, want 0", i, b)
+		}
+	}
+
+	select {
+	case err := <-dialErr:
+		if err != nil {
+			t.Fatalf("create outbound connection: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("outbound connection was never established")
+	}
+}
+
 // assertUpstreamFirstPacket captures the real first packet for password and
 // asserts both the plaintext layout and the TLS record payload length.
 func assertUpstreamFirstPacket(t *testing.T, password string, wantCredential []byte) {

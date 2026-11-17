@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -467,5 +468,141 @@ func TestParsePaddingLenTrimsWhitespace(t *testing.T) {
 	}
 	if _, _, err := ParsePaddingLen(" 64-8 "); err == nil {
 		t.Fatal("inverted range accepted")
+	}
+}
+
+// blockingCarrier serves a canned server preamble, then blocks on Read until the
+// fail latch's read deadline releases it. Writes are accepted and can be made to
+// fail on demand, which is how the write->read failure linkage is exercised
+// without a live server.
+type blockingCarrier struct {
+	mu          sync.Mutex
+	readBuf     []byte
+	writeErr    error
+	blockedRead int
+	wake        chan struct{}
+	wakeOnce    sync.Once
+	entered     chan struct{}
+}
+
+func newBlockingCarrier(preamble []byte) *blockingCarrier {
+	return &blockingCarrier{
+		readBuf: preamble,
+		wake:    make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+}
+
+func (c *blockingCarrier) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	if len(c.readBuf) > 0 {
+		n := copy(p, c.readBuf)
+		c.readBuf = c.readBuf[n:]
+		c.mu.Unlock()
+		return n, nil
+	}
+	wake := c.wake
+	c.blockedRead++
+	c.mu.Unlock()
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	<-wake
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *blockingCarrier) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return len(p), nil
+}
+
+func (c *blockingCarrier) Close() error                     { return nil }
+func (c *blockingCarrier) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *blockingCarrier) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *blockingCarrier) SetDeadline(time.Time) error      { return nil }
+func (c *blockingCarrier) SetWriteDeadline(time.Time) error { return nil }
+
+// SetReadDeadline only releases a blocked Read for a deadline that is already
+// due. The handshake deadline initReader installs is in the future, so it must
+// not disturb the test's blocking read.
+func (c *blockingCarrier) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() && !t.After(time.Now()) {
+		c.wakeOnce.Do(func() { close(c.wake) })
+	}
+	return nil
+}
+
+// TestWriteFailureWakesBlockedReader covers the one-way failure linkage: a
+// payload write error must fail the stream (the CTR keystream has advanced past
+// bytes the server never received) and wake a reader already blocked on the
+// carrier, instead of leaving it parked until the idle timeout.
+func TestWriteFailureWakesBlockedReader(t *testing.T) {
+	ciph := testCipher(t)
+	preamble := make([]byte, 0, FakePrefixLen+len(ciph.token)+2+16)
+	preamble = append(preamble, make([]byte, FakePrefixLen)...) // forged prefix
+	preamble = append(preamble, ciph.token...)                  // echoed token
+	preamble = append(preamble, 0x00)                           // empty server preamble
+	preamble = append(preamble, 0x10)                           // IV length
+	preamble = append(preamble, bytes.Repeat([]byte{0x42}, 16)...)
+	carrier := newBlockingCarrier(preamble)
+	stream := ciph.StreamConn(carrier, []byte{0x01, 0x01, 0x02, 0x03, 0x00, 0x35}).(*Conn)
+	if _, err := stream.Write(nil); err != nil {
+		t.Fatalf("force handshake: %v", err)
+	}
+
+	type readResult struct {
+		n   int
+		err error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		n, err := stream.Read(make([]byte, 8))
+		readDone <- readResult{n: n, err: err}
+	}()
+	select {
+	case <-carrier.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reader never reached the carrier")
+	}
+
+	boom := errors.New("carrier write refused")
+	carrier.mu.Lock()
+	carrier.writeErr = boom
+	carrier.mu.Unlock()
+	if _, err := stream.Write([]byte("hello")); !errors.Is(err, boom) {
+		t.Fatalf("write error = %v, want %v", err, boom)
+	}
+
+	select {
+	case got := <-readDone:
+		if !errors.Is(got.err, boom) {
+			t.Fatalf("blocked read returned (%d, %v), want the write failure %v", got.n, got.err, boom)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked read was not woken by the write failure")
+	}
+
+	// The failure is sticky in both directions: even after the carrier would
+	// accept writes again, Write and Read fail fast without touching it.
+	carrier.mu.Lock()
+	carrier.writeErr = nil
+	blockedBefore := carrier.blockedRead
+	carrier.mu.Unlock()
+	if _, err := stream.Write([]byte("again")); !errors.Is(err, boom) {
+		t.Fatalf("write after failure = %v, want %v", err, boom)
+	}
+	if _, err := stream.Read(make([]byte, 8)); !errors.Is(err, boom) {
+		t.Fatalf("read after failure = %v, want %v", err, boom)
+	}
+	carrier.mu.Lock()
+	blockedAfter := carrier.blockedRead
+	carrier.mu.Unlock()
+	if blockedAfter != blockedBefore {
+		t.Fatalf("read after failure blocked on the carrier %d more times", blockedAfter-blockedBefore)
 	}
 }

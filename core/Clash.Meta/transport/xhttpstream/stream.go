@@ -173,10 +173,42 @@ type Conn struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 
-	// writeErr makes a failed handshake sticky: the CTR keystream has advanced,
-	// so retrying would emit a corrupt header.
-	writeErr          error
+	// failMu guards failErr, the sticky terminal error shared by both directions.
+	// A failed write means the CTR keystream has advanced over bytes that may
+	// never have reached the server, so the stream can not be resynchronised: it
+	// fails closed, and the read side is woken (read deadline latch) instead of
+	// waiting for the carrier's idle timeout to notice.
+	failMu            sync.Mutex
+	failErr           error
 	handshakeDeadline time.Time
+}
+
+// fail records the first terminal error and wakes a reader blocked on the
+// carrier. The deadline is only a latch to interrupt the pending Read; the read
+// path translates the resulting carrier error into the stored failure, so
+// callers see the real cause (for example the failed write) not a timeout.
+func (c *Conn) fail(err error) error {
+	if err == nil {
+		return nil
+	}
+	c.failMu.Lock()
+	first := c.failErr == nil
+	if first {
+		c.failErr = err
+	}
+	err = c.failErr
+	c.failMu.Unlock()
+	if first {
+		_ = c.Conn.SetReadDeadline(time.Now())
+	}
+	return err
+}
+
+// failure returns the sticky terminal error, if any.
+func (c *Conn) failure() error {
+	c.failMu.Lock()
+	defer c.failMu.Unlock()
+	return c.failErr
 }
 
 func (c *Conn) initReader() error {
@@ -226,8 +258,8 @@ func (c *Conn) initWriter() error {
 	if c.w != nil {
 		return nil
 	}
-	if c.writeErr != nil {
-		return c.writeErr
+	if err := c.failure(); err != nil {
+		return err
 	}
 	iv, err := c.ObtainWriteIV()
 	if err != nil {
@@ -261,8 +293,7 @@ func (c *Conn) initWriter() error {
 		enc.XORKeyStream(frame[start:], frame[start:])
 	}
 	if _, err := c.Conn.Write(frame); err != nil {
-		c.writeErr = fmt.Errorf("xhttp: write client handshake: %w", err)
-		return c.writeErr
+		return c.fail(fmt.Errorf("xhttp: write client handshake: %w", err))
 	}
 	c.w = NewWriter(c.Conn, enc)
 	return nil
@@ -272,12 +303,27 @@ func (c *Conn) initWriter() error {
 func (c *Conn) Read(b []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
+	if err := c.failure(); err != nil {
+		return 0, err
+	}
 	if c.r == nil {
 		if err := c.initReader(); err != nil {
+			// A write failure is what interrupted this read (the fail latch sets
+			// a read deadline); report that cause, not the deadline error it
+			// produced.
+			if ferr := c.failure(); ferr != nil {
+				return 0, ferr
+			}
 			return 0, err
 		}
 	}
-	return c.r.Read(b)
+	n, err := c.r.Read(b)
+	if err != nil {
+		if ferr := c.failure(); ferr != nil {
+			return n, ferr
+		}
+	}
+	return n, err
 }
 
 // Write implements net.Conn. A zero length write only forces the handshake,
@@ -285,6 +331,9 @@ func (c *Conn) Read(b []byte) (int, error) {
 func (c *Conn) Write(b []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.failure(); err != nil {
+		return 0, err
+	}
 	if c.w == nil {
 		if err := c.initWriter(); err != nil {
 			return 0, err
@@ -293,31 +342,72 @@ func (c *Conn) Write(b []byte) (int, error) {
 			return 0, nil
 		}
 	}
-	return c.w.Write(b)
+	n, err := c.w.Write(b)
+	if err != nil {
+		err = c.fail(err)
+	}
+	return n, err
 }
 
 // WriteTo implements io.WriterTo.
 func (c *Conn) WriteTo(w io.Writer) (int64, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
+	if err := c.failure(); err != nil {
+		return 0, err
+	}
 	if c.r == nil {
 		if err := c.initReader(); err != nil {
+			if ferr := c.failure(); ferr != nil {
+				return 0, ferr
+			}
 			return 0, err
 		}
 	}
-	return c.r.WriteTo(w)
+	n, err := c.r.WriteTo(w)
+	if err != nil {
+		// The carrier read was interrupted by the fail latch: surface the write
+		// failure the reader was woken for, not the injected deadline error.
+		if ferr := c.failure(); ferr != nil {
+			return n, ferr
+		}
+	}
+	return n, err
 }
 
 // ReadFrom implements io.ReaderFrom.
 func (c *Conn) ReadFrom(r io.Reader) (int64, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.failure(); err != nil {
+		return 0, err
+	}
 	if c.w == nil {
 		if err := c.initWriter(); err != nil {
 			return 0, err
 		}
 	}
-	return c.w.ReadFrom(r)
+	// Deliberately not Writer.ReadFrom: it can not tell a source read error from
+	// a carrier write error, and only the latter must fail the stream (the CTR
+	// keystream has advanced past bytes the server never received).
+	buf := make([]byte, bufSize)
+	var n int64
+	for {
+		nr, er := r.Read(buf)
+		if nr > 0 {
+			nw, ew := c.w.Write(buf[:nr])
+			n += int64(nw)
+			if ew != nil {
+				return n, c.fail(ew)
+			}
+		}
+		if er != nil {
+			if er != io.EOF { // ignore EOF as per io.ReaderFrom contract
+				return n, er
+			}
+			return n, nil
+		}
+	}
 }
 
 // NeedHandshake implements sing's network.EarlyConn, so callers that know the

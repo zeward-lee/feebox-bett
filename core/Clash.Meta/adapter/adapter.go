@@ -212,6 +212,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 	start := time.Now()
 	instance, err := p.DialContext(ctx, &addr)
 	if err != nil {
+		log.Debugln("%s URL test dial %s failed: %v", p.Name(), url, err)
 		return
 	}
 	defer func() {
@@ -254,6 +255,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 	resp, err := client.Do(req)
 
 	if err != nil {
+		log.Debugln("%s URL test request %s failed: %v", p.Name(), url, err)
 		return
 	}
 

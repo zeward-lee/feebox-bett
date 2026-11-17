@@ -48,16 +48,40 @@ func TestParseAnyTLSWithXHTTPTransport(t *testing.T) {
 		t.Fatalf("parse dedicated node: %v", err)
 	}
 	defer proxy.Close()
-	if proxy.Type() != C.AnyTLS {
-		t.Fatalf("adapter type = %v, want AnyTLS", proxy.Type())
+	if proxy.Type() != C.Shanlian {
+		t.Fatalf("adapter type = %v, want Shanlian", proxy.Type())
+	}
+	raw, err := proxy.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"Shanlian"`) {
+		t.Fatalf("API identity = %s, want the Shanlian type", raw)
 	}
 	if proxy.Addr() != "82.163.67.20:6504" {
 		t.Errorf("addr = %q", proxy.Addr())
 	}
 }
 
+// TestParseAnyTLSWithV2RayXHTTPTransportSpelling pins the second spelling of
+// the same transport option: the wire is identical, so the identity is too.
+func TestParseAnyTLSWithV2RayXHTTPTransportSpelling(t *testing.T) {
+	node := shanlianDedicatedNode()
+	node["transport"] = "v2rayxhttp"
+	proxy, err := ParseProxy(node)
+	if err != nil {
+		t.Fatalf("parse dedicated node: %v", err)
+	}
+	defer proxy.Close()
+	if proxy.Type() != C.Shanlian {
+		t.Fatalf("adapter type = %v, want Shanlian", proxy.Type())
+	}
+}
+
 // TestParseAnyTLSWithoutTransportStillWorks guards the zero-impact requirement
-// for ordinary Shanlian nodes: no transport block, same adapter as before.
+// for ordinary Shanlian nodes: no transport block, same adapter as before. The
+// password is the vendor's 32 hex key with no "#sl" marker, which must stay
+// AnyTLS — only the dedicated-line shape reports the Shanlian identity.
 func TestParseAnyTLSWithoutTransportStillWorks(t *testing.T) {
 	node := shanlianDedicatedNode()
 	delete(node, "transport")
@@ -69,6 +93,13 @@ func TestParseAnyTLSWithoutTransportStillWorks(t *testing.T) {
 	defer proxy.Close()
 	if proxy.Type() != C.AnyTLS {
 		t.Errorf("adapter type = %v, want AnyTLS", proxy.Type())
+	}
+	raw, err := proxy.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"AnyTLS"`) {
+		t.Errorf("API identity = %s, want the AnyTLS type", raw)
 	}
 }
 

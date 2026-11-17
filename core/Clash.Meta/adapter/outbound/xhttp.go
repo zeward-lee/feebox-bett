@@ -111,8 +111,12 @@ type XHttpOption struct {
 	XHTTPOpts         XHTTPOptions `proxy:"xhttp-opts,omitempty"`
 	Clover            string       `proxy:"clover,omitempty"`
 	Encryption        string       `proxy:"encryption,omitempty"`
-	UpSpeed           string       `proxy:"up-speed,omitempty"`
-	DownSpeed         string       `proxy:"down-speed,omitempty"`
+	// Gateway is the vendor subscription's spelling of the same gateway endpoint
+	// Clover carries in the app-side node JSON (see isHeySocksXHttp). It is read
+	// only as an identity marker; the transport does not use it.
+	Gateway   string `proxy:"gateway,omitempty"`
+	UpSpeed   string `proxy:"up-speed,omitempty"`
+	DownSpeed string `proxy:"down-speed,omitempty"`
 }
 
 // XHttp is the private xhttp outbound.
@@ -256,6 +260,33 @@ func applyConfigBlob(option *XHttpOption) error {
 	return nil
 }
 
+// isHeySocksXHttp reports whether the node is the vendor's own xhttp flavour,
+// which publishes the site identity `Heysocks` instead of the plain `Xhttp`.
+//
+// The marker is the node's gateway endpoint, written by the vendor client on
+// every one of its nodes:
+//
+//   - the app-side / memory-extracted node JSON spells it `clover: <gateway>`
+//     and tags the wire `encryption: fake-net`;
+//   - the downloadable subscription (the HeySocks profile on this machine)
+//     spells the same gateway `gateway: <host:port>` and carries `sess`/`auth`
+//     next to it.
+//
+// Any of the three keys is enough. `fake-net` on its own is deliberately not a
+// marker: the transport uses that frame layout on both flavours, so keying on it
+// would merge the Heysocks identity back into Xhttp — the two identities must
+// stay separate. A plain `type: xhttp` node carries none of these keys and keeps
+// reporting Xhttp.
+func isHeySocksXHttp(option *XHttpOption) bool {
+	if strings.TrimSpace(option.Clover) != "" {
+		return true
+	}
+	if strings.TrimSpace(option.Gateway) != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(option.Encryption), "fake-net")
+}
+
 // NewXHttp builds the adapter and resolves every static option up front, so a
 // bad node fails at load time instead of on the first connection.
 //
@@ -316,6 +347,12 @@ func NewXHttp(option XHttpOption) (*XHttp, error) {
 		cipher: ciph,
 	}
 	x.dialer = option.NewDialer(x.DialOptions())
+	// The identity is decided from the resolved option table (after the config
+	// blob merge), and Type()/MarshalJSON both read Base.tp, so the API and the
+	// UI see Heysocks for the vendor's own nodes and Xhttp for plain ones.
+	if isHeySocksXHttp(&option) {
+		x.SetAdapterType(C.Heysocks)
+	}
 	return x, nil
 }
 
@@ -348,6 +385,9 @@ func newDynamicXHttp(option XHttpOption) (*XHttp, error) {
 		dynamic: true,
 	}
 	x.dialer = option.NewDialer(x.DialOptions())
+	if isHeySocksXHttp(&option) {
+		x.SetAdapterType(C.Heysocks)
+	}
 	return x, nil
 }
 

@@ -130,3 +130,71 @@ func TestXhttpAdapterType(t *testing.T) {
 		t.Fatalf("C.XHttp.String() = %q, want XHttp", got)
 	}
 }
+
+// TestXhttpHeySocksIdentity pins the site identity at the constructor, which is
+// the single place the marker is read: Type() and MarshalJSON must agree because
+// both read Base.tp.
+func TestXhttpHeySocksIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		opt  XHttpOption
+		want C.AdapterType
+	}{
+		{
+			// App-extracted node shape: clover + encryption: fake-net.
+			name: "clover",
+			opt: XHttpOption{
+				Name:       "heysocks clover",
+				Server:     "192.0.2.10",
+				Port:       10007,
+				Password:   "secret:0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+				Cipher:     "aes-128-ctr",
+				Clover:     "203.0.113.7",
+				Encryption: "fake-net",
+			},
+			want: C.Heysocks,
+		},
+		{
+			// Subscription node shape: gateway + sess/auth, no clover.
+			name: "gateway",
+			opt: XHttpOption{
+				Name:     "heysocks subscription",
+				Server:   "192.0.2.10",
+				Port:     10025,
+				Password: "secret:0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+				Cipher:   "aes-128-ctr",
+				Gateway:  "192.0.2.10:10025",
+			},
+			want: C.Heysocks,
+		},
+		{
+			name: "plain xhttp",
+			opt: XHttpOption{
+				Name:     "plain",
+				Server:   "192.0.2.10",
+				Port:     443,
+				Password: "secret:0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+			},
+			want: C.XHttp,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			x, err := NewXHttp(tc.opt)
+			if err != nil {
+				t.Fatalf("NewXHttp: %v", err)
+			}
+			if got := x.Type(); got != tc.want {
+				t.Fatalf("type = %v, want %v", got, tc.want)
+			}
+			raw, err := x.MarshalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantJSON := `"type":"` + tc.want.String() + `"`
+			if !strings.Contains(string(raw), wantJSON) {
+				t.Fatalf("API identity = %s, want %s", raw, wantJSON)
+			}
+		})
+	}
+}

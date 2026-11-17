@@ -162,6 +162,13 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		outbound.xhttp = xhttpClient
 		sessionDialer = v2rayxhttp.NewDialer(xhttpClient)
 		skipAnyTLSTLS = true
+		// The dedicated-line shape (anytls over the vendor v2rayxhttp transport)
+		// carries the Shanlian site identity, which the UI maps to 闪连. A plain
+		// anytls node (no transport block), including one whose password is a
+		// 32 hex key without the "#sl" marker, keeps reporting AnyTLS. Both
+		// spellings of the transport option ("xhttp" / "v2rayxhttp") select the
+		// same wire, so both carry the identity.
+		outbound.SetAdapterType(C.Shanlian)
 	}
 
 	tOption := anytls.ClientConfig{

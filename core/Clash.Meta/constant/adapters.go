@@ -80,6 +80,12 @@ const (
 	// `sntp-eclipse-v3-native-1`): X25519 + XChaCha20-Poly1305 records over
 	// TCP. Appended at the end for the same reason as the types above.
 	SNTPEclipse
+	// Heysocks is the site identity of the vendor's own `type: xhttp` nodes
+	// (the node carries a gateway endpoint, see isHeySocksXHttp in
+	// adapter/outbound/xhttp.go). A plain `type: xhttp` node without that
+	// marker keeps reporting XHttp: the two identities are deliberately NOT
+	// merged. Appended at the end for the same reason as the types above.
+	Heysocks
 )
 
 const (
@@ -294,6 +300,8 @@ func (at AdapterType) String() string {
 		return "Pure"
 	case SNTPEclipse:
 		return "SNTP"
+	case Heysocks:
+		return "Heysocks"
 	case Relay:
 		return "Relay"
 	case Selector:

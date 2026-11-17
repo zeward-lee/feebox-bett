@@ -310,3 +310,38 @@ func TestWriteAfterReadKeepsOwnCipherState(t *testing.T) {
 		t.Fatalf("client read two: %q err=%v", got[:3], err)
 	}
 }
+
+// TestFirstBlockLengthIsNotTruncated covers the BE16 first-block length in the
+// meta record: a block longer than 65535 bytes must be rejected before it is
+// serialised, because uint16() would silently truncate the advertised length and
+// the peer would read a short prefix as a complete AEAD record (desync, no error).
+func TestFirstBlockLengthIsNotTruncated(t *testing.T) {
+	cfg := testConfig()
+	cc := &captureConn{}
+	c := NewConn(cc, cfg, true)
+	// planFirstBlock gives up on such an address (budget <= 0 => pad 1, payload
+	// 0), leaving addrLen+2+1 bytes, which is already past the BE16 limit.
+	c.SetAddr(bytes.Repeat([]byte{0x01}, maxRecordLen+1))
+	if _, err := c.Write([]byte("x")); err == nil {
+		t.Fatal("oversized first block was accepted")
+	}
+	if cc.buf.Len() != 0 {
+		t.Fatalf("oversized first block wrote %d bytes on the wire, want 0", cc.buf.Len())
+	}
+}
+
+// TestResponderRecordLengthIsNotTruncated covers the same BE16 field in the
+// responder's self-describing first record (total/pad). A first write that does
+// not fit must fail instead of advertising a truncated total.
+func TestResponderRecordLengthIsNotTruncated(t *testing.T) {
+	cfg := testConfig()
+	cc := &captureConn{}
+	c := NewConn(cc, cfg, false)
+	payload := bytes.Repeat([]byte{0x5a}, maxRecordLen+1)
+	if _, err := c.Write(payload); err == nil {
+		t.Fatal("oversized responder record was accepted")
+	}
+	if cc.buf.Len() != 0 {
+		t.Fatalf("oversized responder record wrote %d bytes on the wire, want 0", cc.buf.Len())
+	}
+}

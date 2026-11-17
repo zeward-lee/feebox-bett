@@ -45,6 +45,12 @@ const (
 	// paddingRandMax is the reference random padding ceiling (0x384): every
 	// data chunk carries rand.Intn(900)+1 = 1..900 padding bytes.
 	paddingRandMax = 900
+
+	// maxRecordLen is the largest plaintext length a BE16 length field can
+	// carry. Both the first block (meta[10:12]) and the responder header
+	// (total/pad) are advertised as BE16, so anything longer must be rejected
+	// before it is serialised instead of being silently truncated.
+	maxRecordLen = 0xffff
 )
 
 // planFirstBlock mirrors the reference core.planFirstBlock: given the socks
@@ -296,14 +302,21 @@ func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
 	if pad < 0 {
 		pad = 0
 	}
-	if pad > 0xffff {
-		pad = 0xffff
+	if pad > maxRecordLen {
+		pad = maxRecordLen
+	}
+	// total/pad are BE16 fields: a longer first record can not be described on
+	// the wire, so refuse it instead of truncating the advertised length (which
+	// would desynchronise the peer's reader with no error raised anywhere).
+	total := len(payload) + pad
+	if total > maxRecordLen {
+		return 0, fmt.Errorf("ninja: responder record length %d exceeds BE16 limit %d", total, maxRecordLen)
 	}
 	hdr := make([]byte, responderHeaderLen)
 	hdr[0] = c.wst.role
 	binary.BigEndian.PutUint64(hdr[1:9], uint64(time.Now().UnixMilli()))
 	copy(hdr[9:9+tokenLen], c.wst.banner)
-	binBE16(hdr[9+tokenLen:11+tokenLen], uint16(len(payload)+pad))
+	binBE16(hdr[9+tokenLen:11+tokenLen], uint16(total))
 	binBE16(hdr[11+tokenLen:], uint16(pad))
 
 	body := make([]byte, 0, len(payload)+pad)
@@ -337,8 +350,16 @@ func (c *Conn) writeHeader(dstAddr []byte, pad int, firstPayload []byte) error {
 	if pad < 0 {
 		pad = 0
 	}
-	if pad > 0xffff {
-		pad = 0xffff
+	if pad > maxRecordLen {
+		pad = maxRecordLen
+	}
+	// The meta record advertises the first block length through a BE16 field.
+	// planFirstBlock keeps it at ~879 bytes today, but a longer SetAddr (or a
+	// future budget change) would be silently truncated by uint16(), and the
+	// peer would then read a fixed prefix as a full AEAD record and desync.
+	// Reject before serialising so the length field is always exact.
+	if n := len(dstAddr) + 2 + pad + len(firstPayload); n > maxRecordLen {
+		return fmt.Errorf("ninja: first block length %d exceeds BE16 limit %d", n, maxRecordLen)
 	}
 	first := make([]byte, 0, len(dstAddr)+2+pad+len(firstPayload))
 	first = append(first, dstAddr...)

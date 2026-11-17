@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/metacubex/mihomo/log"
 )
 
 const (
@@ -271,7 +273,10 @@ func ProcessNinjaObfuscation(proxies []map[string]any, raw []byte) {
 			continue
 		}
 		if err := restoreNinjaNode(p); err != nil {
-			delete(p, "tls")
+			// Keep the original fields when decoding fails. Dropping "tls"
+			// here would silently degrade an already-plaintext node to a
+			// cleartext dial, so surface the failure instead of mangling it.
+			log.Warnln("ninja: restore node %q failed: %s", ninjaStr(p, "name"), err)
 		}
 	}
 	info, ok := extractNinjaPassInfo(raw)

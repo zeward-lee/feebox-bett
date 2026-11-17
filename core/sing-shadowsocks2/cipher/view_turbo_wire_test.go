@@ -54,8 +54,8 @@ func TestViewTurboFirstWriteWire(t *testing.T) {
 	}
 	wire := underlying.writes.Bytes()
 	headerEnd := bytes.Index(wire, []byte("\r\n\r\n"))
-	if headerEnd < 20 || headerEnd > 25 {
-		t.Fatalf("fake header length = %d; want 20..25", headerEnd)
+	if headerEnd < viewTurboMinHeaderLength || headerEnd > viewTurboMaxHeaderLength {
+		t.Fatalf("fake header length = %d; want %d..%d", headerEnd, viewTurboMinHeaderLength, viewTurboMaxHeaderLength)
 	}
 	for i, b := range wire[:headerEnd] {
 		if b < 'A' || b > 'Z' && b < 'a' || b > 'z' {
@@ -124,10 +124,60 @@ func TestViewTurboReadStripsHeaderAndDrainsLeftover(t *testing.T) {
 }
 
 func TestViewTurboReadRejectsOverlongHeader(t *testing.T) {
-	underlying := &memoryConn{reader: bytes.NewReader(bytes.Repeat([]byte{'x'}, 4097))}
+	// One byte past the vendor's 64 KiB limit, with no "\r\n\r\n" in sight.
+	overlong := bytes.Repeat([]byte{'x'}, viewTurboMaxHeader+1024)
+	underlying := &memoryConn{reader: bytes.NewReader(overlong)}
 	conn := &viewTurboConn{Conn: underlying, firstRead: true}
 
 	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Read error = %v; want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// TestViewTurboReadAcceptsLargeHeader pins the read cap at the vendor's 64 KiB:
+// an 8 KiB forged header (well past the old 4096 limit) must be stripped, not
+// mistaken for EOF, and the payload behind it must survive.
+func TestViewTurboReadAcceptsLargeHeader(t *testing.T) {
+	payload := []byte("real-stream-bytes")
+	wire := append(bytes.Repeat([]byte("X"), 8192), []byte("\r\n\r\n")...)
+	wire = append(wire, payload...)
+	underlying := &memoryConn{reader: bytes.NewReader(wire)}
+	conn := &viewTurboConn{Conn: underlying, firstRead: true}
+
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("Read = %v; want the payload after an 8 KiB header", err)
+	}
+	if !bytes.Equal(buf, payload) {
+		t.Fatalf("payload = %q; want %q", buf, payload)
+	}
+}
+
+// TestViewTurboFakeHeaderLengthRange pins the forged-header length window: the
+// vendor randomizes it over 32..128 letters, and the fake request line must use
+// the whole window (a fixed or narrow length is a fingerprint).
+func TestViewTurboFakeHeaderLengthRange(t *testing.T) {
+	conn := &viewTurboConn{random: rand.New(rand.NewSource(7))}
+	minSeen, maxSeen := viewTurboMaxHeaderLength, viewTurboMinHeaderLength
+	for i := 0; i < 500; i++ {
+		n := len(conn.randomString(viewTurboMinHeaderLength, viewTurboMaxHeaderLength))
+		if n < viewTurboMinHeaderLength || n > viewTurboMaxHeaderLength {
+			t.Fatalf("length %d outside %d..%d", n, viewTurboMinHeaderLength, viewTurboMaxHeaderLength)
+		}
+		if n < minSeen {
+			minSeen = n
+		}
+		if n > maxSeen {
+			maxSeen = n
+		}
+	}
+	if minSeen > viewTurboMinHeaderLength+8 {
+		t.Errorf("min observed length = %d; want the window to reach %d", minSeen, viewTurboMinHeaderLength)
+	}
+	if maxSeen < viewTurboMaxHeaderLength-8 {
+		t.Errorf("max observed length = %d; want the window to reach %d", maxSeen, viewTurboMaxHeaderLength)
+	}
+	if maxSeen-minSeen < (viewTurboMaxHeaderLength-viewTurboMinHeaderLength)*3/4 {
+		t.Errorf("length only spans %d..%d; want the full 32..128 window", minSeen, maxSeen)
 	}
 }

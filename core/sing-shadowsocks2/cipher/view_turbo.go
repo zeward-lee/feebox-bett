@@ -16,7 +16,7 @@ import (
 // The ViewTurbo variant of a shadowsocks node hides the real shadowsocks
 // handshake behind a forged HTTP request:
 //
-//	<20-25 random letters>\r\n\r\n    forged request line and header end
+//	<32-128 random letters>\r\n\r\n   forged request line and header end
 //	<60 byte token block>             token, second byte inverted, ':' padded
 //	<32 byte salt block>              first salt block, first byte inverted
 //	<remainder of the first write>
@@ -46,8 +46,14 @@ const (
 	viewTurboPlaceholderPassword = "password"
 
 	// viewTurboMaxHeader bounds the forged response header the reader will
-	// buffer before it gives up.
-	viewTurboMaxHeader = 4096
+	// buffer before it gives up. The vendor client accepts up to 64 KiB.
+	viewTurboMaxHeader = 65536
+
+	// viewTurboMinHeader/viewTurboMaxHeaderLength bound the random length of the
+	// forged request line that precedes the "\r\n\r\n" terminator. The vendor
+	// client randomizes it over 32..128 letters.
+	viewTurboMinHeaderLength = 32
+	viewTurboMaxHeaderLength = 128
 )
 
 // ParseViewTurboPassword strips the ViewTurbo marker off a node password. The
@@ -147,7 +153,7 @@ func (c *viewTurboConn) Write(b []byte) (int, error) {
 	}
 	c.firstWrite = false
 
-	fakeHeader := c.randomString(20, 25) + "\r\n\r\n"
+	fakeHeader := c.randomString(viewTurboMinHeaderLength, viewTurboMaxHeaderLength) + "\r\n\r\n"
 	if _, err := c.Conn.Write([]byte(fakeHeader)); err != nil {
 		return 0, err
 	}

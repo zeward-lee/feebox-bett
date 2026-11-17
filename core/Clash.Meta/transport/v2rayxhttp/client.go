@@ -244,17 +244,22 @@ func newEndpoint(dialer N.Dialer, options endpointOptions) (*endpoint, error) {
 }
 
 // newHTTPClient builds a client whose single connection is dialed through the
-// proxy dialer, optionally obfuscated, then TLS-wrapped. The ALPN list decides
-// the protocol: h2 uses http2.Transport (one conn multiplexes streams), while a
-// node that asked for something else gets an HTTP/1.1 transport, where every
-// in-flight stream needs its own TCP connection.
+// proxy dialer and then TLS-wrapped. The ALPN list decides the protocol: h2 uses
+// http2.Transport (one conn multiplexes streams), while a node that asked for
+// something else gets an HTTP/1.1 transport, where every in-flight stream needs
+// its own TCP connection.
+//
+// The obfs layer is NOT applied here: the vendor wraps the HTTP stream bodies
+// (`obfsReader` on the response body, `obfsWriter` on the request body), so the
+// TLS handshake travels unwrapped and the obfuscation is added per body in
+// openUpload/openDownload/openSingleStream. Do not wrap `conn` again - a server
+// that answers a plain TLS record will reject the 20-byte obfs preamble.
 func (e *endpoint) newHTTPClient(dialer N.Dialer) (*http.Client, error) {
 	dialConn := func(ctx context.Context, _ string, _ string) (net.Conn, error) {
 		conn, err := dialer.DialContext(ctx, N.NetworkTCP, e.dest)
 		if err != nil {
 			return nil, err
 		}
-		conn = newObfsConn(conn, e.obfsKey)
 		tlsConn, err := vmess.StreamTLSConn(ctx, conn, e.tls)
 		if err != nil {
 			_ = conn.Close()
@@ -346,7 +351,9 @@ func (e *endpoint) openDownload(ctx context.Context, session string) (*waitReadC
 			reader.fail(fmt.Errorf("v2rayxhttp: download stream returned %s", resp.Status))
 			return
 		}
-		reader.set(resp.Body)
+		// The vendor obfs layer belongs to the HTTP body: the downstream half
+		// is deobfuscated as it is read, after TLS and dechunking.
+		reader.set(wrapObfsReader(resp.Body, e.obfsKey))
 	}()
 	return reader, entry, nil
 }
@@ -365,7 +372,9 @@ func (e *endpoint) openUpload(ctx context.Context, session string) (*pipeWriter,
 	requestCtx, cancel := context.WithCancel(contextutils.WithoutCancel(ctx))
 	requestCtx = context.WithValue(requestCtx, uploadAttemptKey{}, &uploadAttempt{})
 	pr, pw := io.Pipe()
-	writer := newPipeWriter(pw)
+	// The vendor obfs layer belongs to the HTTP body: the upstream half is
+	// obfuscated between the stream writer and the request body pipe.
+	writer := newPipeWriter(pw, e.obfsKey)
 	req, err := http.NewRequestWithContext(requestCtx, e.method, e.requestURL(session).String(), pr)
 	if err != nil {
 		cancel()
@@ -408,7 +417,9 @@ func (e *endpoint) openSingleStream(ctx context.Context, session string) (io.Rea
 	requestCtx, cancel := context.WithCancel(contextutils.WithoutCancel(ctx))
 	requestCtx = context.WithValue(requestCtx, uploadAttemptKey{}, &uploadAttempt{})
 	pr, pw := io.Pipe()
-	writer := newPipeWriter(pw)
+	// Stream-one carries both directions on one HTTP exchange: the request
+	// body is obfuscated on the write side, the response body on the read side.
+	writer := newPipeWriter(pw, e.obfsKey)
 	req, err := http.NewRequestWithContext(requestCtx, e.method, e.requestURL(session).String(), pr)
 	if err != nil {
 		cancel()
@@ -434,7 +445,7 @@ func (e *endpoint) openSingleStream(ctx context.Context, session string) (io.Rea
 			writer.fail(fmt.Errorf("v2rayxhttp: stream returned %s", resp.Status))
 			return
 		}
-		reader.set(resp.Body)
+		reader.set(wrapObfsReader(resp.Body, e.obfsKey))
 	}()
 	return reader, writer, entry, nil
 }
@@ -541,16 +552,22 @@ func (w *waitReadCloser) Close() error {
 // the request body and remembers the first transport-level failure, so a dead
 // upload is reported on the write path instead of surfacing as a broken pipe
 // with no cause, and (through onFailure) on the download half as well.
+//
+// out is the body source net/http reads: the obfs writer when the node has an
+// obfs key, the pipe itself otherwise. Wrapping here keeps the vendor obfs at
+// the HTTP body layer while the failure bookkeeping stays on the pipe.
 type pipeWriter struct {
 	pw *io.PipeWriter
+
+	out io.Writer
 
 	mu        sync.Mutex
 	err       error
 	onFailure func(error)
 }
 
-func newPipeWriter(pw *io.PipeWriter) *pipeWriter {
-	return &pipeWriter{pw: pw}
+func newPipeWriter(pw *io.PipeWriter, obfsKey string) *pipeWriter {
+	return &pipeWriter{pw: pw, out: wrapObfsWriter(pw, obfsKey)}
 }
 
 func (w *pipeWriter) Write(b []byte) (int, error) {
@@ -560,7 +577,7 @@ func (w *pipeWriter) Write(b []byte) (int, error) {
 	if stored != nil {
 		return 0, stored
 	}
-	return w.pw.Write(b)
+	return w.out.Write(b)
 }
 
 func (w *pipeWriter) Close() error {

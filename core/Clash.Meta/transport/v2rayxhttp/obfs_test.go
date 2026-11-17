@@ -3,6 +3,7 @@ package v2rayxhttp
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -10,22 +11,25 @@ import (
 	"time"
 )
 
-// TestObfsRoundTrip checks the symmetric obfs layer: the connector writes a
-// 20-byte preamble (IV + tag) and both directions then speak AES-CTR.
+// TestObfsRoundTrip checks the symmetric obfs layer: the writer sends a 20-byte
+// preamble (IV + tag) and both directions then speak AES-CTR. The wrappers are
+// stream-body wrappers (io.Writer / io.Reader), not net.Conn wrappers.
 func TestObfsRoundTrip(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	const key = "9uByRBBiCy"
-	client := newObfsConn(clientSide, key)
-	server := newObfsConn(serverSide, key)
+	clientWriter := wrapObfsWriter(clientSide, key)
+	serverReader := &obfsReader{r: serverSide, key: deriveObfsKey(key)}
+	serverWriter := wrapObfsWriter(serverSide, key)
+	clientReader := &obfsReader{r: clientSide, key: deriveObfsKey(key)}
 
 	done := make(chan error, 2)
 	go func() {
-		_, err := client.Write([]byte("hello dedicated line"))
+		_, err := clientWriter.Write([]byte("hello dedicated line"))
 		done <- err
 	}()
 	go func() {
 		buf := make([]byte, 64)
-		n, err := server.Read(buf)
+		n, err := serverReader.Read(buf)
 		if err == nil && string(buf[:n]) != "hello dedicated line" {
 			t.Errorf("server read %q", buf[:n])
 			err = io.ErrUnexpectedEOF
@@ -43,14 +47,15 @@ func TestObfsRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Reverse direction reuses the same wrapper with its own preamble.
+	// Reverse direction uses its own wrapper and IV, exactly like the vendor's
+	// per-direction obfsReader/obfsWriter pair.
 	go func() {
-		_, err := server.Write([]byte("pong"))
+		_, err := serverWriter.Write([]byte("pong"))
 		done <- err
 	}()
 	go func() {
 		buf := make([]byte, 16)
-		n, err := client.Read(buf)
+		n, err := clientReader.Read(buf)
 		if err == nil && string(buf[:n]) != "pong" {
 			t.Errorf("client read %q", buf[:n])
 			err = io.ErrUnexpectedEOF
@@ -58,8 +63,13 @@ func TestObfsRoundTrip(t *testing.T) {
 		done <- err
 	}()
 	for i := 0; i < 2; i++ {
-		if err := <-done; err != nil {
-			t.Fatalf("obfs reverse round trip: %v", err)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("obfs reverse round trip: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("obfs reverse round trip timed out")
 		}
 	}
 }
@@ -78,7 +88,7 @@ func TestObfsHandshakePreamble(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	obfs := newObfsConn(conn, "9uByRBBiCy")
+	obfs := wrapObfsWriter(conn, "9uByRBBiCy")
 	go func() {
 		_, _ = obfs.Write([]byte{0x16, 0x03, 0x01}) // fake TLS record header
 	}()
@@ -123,39 +133,39 @@ func TestObfsKeyDerivation(t *testing.T) {
 	sum := sha256.Sum256([]byte(obfsKey))
 	got := hex.EncodeToString(sum[:obfsKeyLength])
 	if got != wantHex {
-		t.Fatalf("derived key = %s, want %s (vendor SDK-256[:16], no domain separation)", got, wantHex)
+		t.Fatalf("derived key = %s, want %s (vendor SHA-256[:16], no domain separation)", got, wantHex)
 	}
 
-	conn := newObfsConn(&deadConn{}, obfsKey).(*obfsConn)
-	if key := hex.EncodeToString(conn.key[:]); key != wantHex {
-		t.Fatalf("obfsConn key = %s, want %s", key, wantHex)
+	key := deriveObfsKey(obfsKey)
+	if hex.EncodeToString(key[:]) != wantHex {
+		t.Fatalf("obfs key = %s, want %s", hex.EncodeToString(key[:]), wantHex)
 	}
-	// An empty key returns the conn untouched: Validate rejects a missing key, so
-	// only an explicit opt-out reaches this branch.
-	plain := &deadConn{}
-	if wrapped := newObfsConn(plain, ""); wrapped != net.Conn(plain) {
-		t.Fatal("empty obfs key must pass the conn through unchanged")
+	// An empty key returns the body untouched: Validate rejects a missing key,
+	// so only an explicit opt-out reaches this branch.
+	plain := &deadWriter{}
+	if wrapped := wrapObfsWriter(plain, ""); wrapped != io.Writer(plain) {
+		t.Fatal("empty obfs key must pass the writer through unchanged")
 	}
 }
 
-// TestObfsIVIsFreshAndFullLength checks the per-connection preamble: a fresh
-// random 16-byte IV for every connection, never reused.
+// TestObfsIVIsFreshAndFullLength checks the per-body preamble: a fresh random
+// 16-byte IV for every obfuscated stream, never reused.
 func TestObfsIVIsFreshAndFullLength(t *testing.T) {
 	ivs := make(map[string]bool, 2)
 	for i := 0; i < 2; i++ {
 		iv := captureClientIV(t)
 		if len(iv) != obfsIVLength {
-			t.Fatalf("connection %d IV length = %d, want %d", i, len(iv), obfsIVLength)
+			t.Fatalf("stream %d IV length = %d, want %d", i, len(iv), obfsIVLength)
 		}
 		if ivs[string(iv)] {
-			t.Fatalf("connection %d reused IV %x", i, iv)
+			t.Fatalf("stream %d reused IV %x", i, iv)
 		}
 		ivs[string(iv)] = true
 	}
 }
 
 // captureClientIV dials a loopback listener, writes one payload through a fresh
-// obfs conn and returns the IV of the preamble the peer received.
+// obfs writer and returns the IV of the preamble the peer received.
 func captureClientIV(t *testing.T) []byte {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -168,7 +178,7 @@ func captureClientIV(t *testing.T) []byte {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	obfs := newObfsConn(conn, "9uByRBBiCy")
+	obfs := wrapObfsWriter(conn, "9uByRBBiCy")
 	go func() {
 		_, _ = obfs.Write([]byte("iv probe"))
 	}()
@@ -188,20 +198,14 @@ func captureClientIV(t *testing.T) []byte {
 	return iv
 }
 
-// TestObfsBadPreambleClosesConn pins the review fix: a preamble that fails the
-// tag check leaves the conn unusable, so the wrapper closes the socket instead
-// of letting it linger until a read timeout.
-func TestObfsBadPreambleClosesConn(t *testing.T) {
-	clientSide, peer := net.Pipe()
-	defer peer.Close()
-	recorder := &closeRecorder{Conn: clientSide}
-	obfs := newObfsConn(recorder, "right-key")
-
-	go func() {
-		// 16-byte IV and a 4-byte tag that decrypts to 89c6fea7 with this key,
-		// i.e. a peer that used a different obfs key.
-		_, _ = peer.Write(make([]byte, obfsPreamble))
-	}()
+// TestObfsBadPreambleClosesBody pins fail-closed behaviour: a preamble that
+// fails the tag check leaves the stream unusable, so the body is closed and the
+// error is sticky (a retry must not re-read the same garbage).
+func TestObfsBadPreambleClosesBody(t *testing.T) {
+	recorder := &closeRecorderReader{
+		Reader: strings.NewReader(string(make([]byte, obfsPreamble))),
+	}
+	obfs := wrapObfsReader(recorder, "right-key")
 
 	buf := make([]byte, 8)
 	_, err := obfs.Read(buf)
@@ -209,46 +213,69 @@ func TestObfsBadPreambleClosesConn(t *testing.T) {
 		t.Fatalf("read error = %v, want obfs key mismatch", err)
 	}
 	if !recorder.closed {
-		t.Error("underlying conn was not closed after a bad preamble")
+		t.Error("underlying body was not closed after a bad preamble")
+	}
+	if _, err := obfs.Read(buf); err == nil || !strings.Contains(err.Error(), obfsKeyMismatch) {
+		t.Fatalf("second read error = %v, want the sticky obfs key mismatch", err)
 	}
 }
 
-type closeRecorder struct {
-	net.Conn
+type closeRecorderReader struct {
+	io.Reader
 	closed bool
 }
 
-func (c *closeRecorder) Close() error {
-	c.closed = true
-	return c.Conn.Close()
+func (r *closeRecorderReader) Close() error {
+	r.closed = true
+	return nil
 }
 
-// deadConn is a net.Conn that is never read or written; it only exists so the
-// key-derivation test can build an obfsConn without a socket.
-type deadConn struct{}
+// deadWriter is an io.Writer that is never written to; it only exists so the
+// key-derivation test can build an obfs writer without a socket.
+type deadWriter struct{}
 
-func (*deadConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (*deadConn) Write([]byte) (int, error)        { return 0, io.EOF }
-func (*deadConn) Close() error                     { return nil }
-func (*deadConn) LocalAddr() net.Addr              { return nil }
-func (*deadConn) RemoteAddr() net.Addr             { return nil }
-func (*deadConn) SetDeadline(time.Time) error      { return nil }
-func (*deadConn) SetReadDeadline(time.Time) error  { return nil }
-func (*deadConn) SetWriteDeadline(time.Time) error { return nil }
+func (*deadWriter) Write([]byte) (int, error) { return 0, io.EOF }
 
 // TestObfsKeyMismatch mirrors the vendor error path: a preamble whose tag does
 // not decrypt to zero means the peer used a different obfs key.
 func TestObfsKeyMismatch(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
-	client := newObfsConn(clientSide, "wrong-key")
-	server := newObfsConn(serverSide, "right-key")
+	client := wrapObfsWriter(clientSide, "wrong-key")
+	server := wrapObfsReader(&nopReadCloser{serverSide}, "right-key")
 	go func() {
 		_, _ = client.Write([]byte("x"))
 	}()
 	_ = serverSide.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 8)
 	_, err := server.Read(buf)
-	if err == nil || !strings.Contains(err.Error(), "obfs key mismatch") {
+	if err == nil || !strings.Contains(err.Error(), obfsKeyMismatch) {
 		t.Fatalf("got error %v, want obfs key mismatch", err)
 	}
 }
+
+type nopReadCloser struct {
+	io.Reader
+}
+
+func (nopReadCloser) Close() error { return nil }
+
+// TestObfsWriterErrorIsSticky pins the write half of fail-closed: once a write
+// to the body fails, later writes keep reporting the same error instead of
+// emitting bytes that continue a broken CTR stream.
+func TestObfsWriterErrorIsSticky(t *testing.T) {
+	writer := wrapObfsWriter(&failingWriter{}, "key")
+	if _, err := writer.Write([]byte("boom")); err == nil {
+		t.Fatal("first write should fail")
+	} else if !errors.Is(err, errWriterBoom) {
+		t.Fatalf("first write error = %v, want %v", err, errWriterBoom)
+	}
+	if _, err := writer.Write([]byte("again")); !errors.Is(err, errWriterBoom) {
+		t.Fatalf("second write error = %v, want the sticky %v", err, errWriterBoom)
+	}
+}
+
+var errWriterBoom = errors.New("writer boom")
+
+type failingWriter struct{}
+
+func (*failingWriter) Write([]byte) (int, error) { return 0, errWriterBoom }

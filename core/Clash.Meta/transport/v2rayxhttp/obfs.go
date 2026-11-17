@@ -8,12 +8,19 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
-	"net"
 	"sync"
 )
 
-// The Shanlian fork wraps every XHTTP TCP connection (below TLS) in a keyed
-// stream obfuscation layer. The wire shape was recovered from the vendor core
+// The Shanlian fork wraps the XHTTP HTTP stream bodies in a keyed stream
+// obfuscation layer. The layer sits on the HTTP body of a request/response, not
+// below TLS: the vendor core exposes `obfsReader` (downstream response body) and
+// `obfsWriter` (upstream request body) rather than a connection wrapper, and the
+// dedicated line endpoints complete a plain TLS 1.3 handshake and answer a plain
+// HTTP/1.1 request. Wrapping the TCP conn instead breaks the handshake (the
+// server sees the 20-byte obfs preamble where it expects a TLS record and drops
+// the connection), so do not move these wrappers back below `StreamTLSConn`.
+//
+// The wire shape was recovered from the vendor core
 // (`transport/v2rayxhttp/obfs.go` in `lightningx-windows-amd64.exe`), which is
 // not part of upstream sing-box:
 //
@@ -31,7 +38,10 @@ import (
 //
 // The receiver reads the 20-byte preamble, decrypts the 4-byte tag with the
 // CTR stream and requires it to be four zero bytes; anything else is reported
-// as "obfs key mismatch" exactly like the vendor implementation.
+// as "obfs key mismatch" exactly like the vendor implementation. A failed
+// preamble is sticky: the stream can never be decrypted again, so every later
+// Read keeps returning the same error and the body is closed (fail-closed)
+// instead of hanging until the session times out.
 const (
 	obfsIVLength    = aes.BlockSize
 	obfsTagLength   = 4
@@ -40,81 +50,56 @@ const (
 	obfsKeyMismatch = "obfs key mismatch"
 )
 
-type obfsConn struct {
-	net.Conn
-	key [obfsKeyLength]byte
+type obfsAESKey [obfsKeyLength]byte
 
-	readMu     sync.Mutex
-	readStream cipher.Stream
-
-	writeMu     sync.Mutex
-	writeStream cipher.Stream
+func deriveObfsKey(obfsKey string) obfsAESKey {
+	sum := sha256.Sum256([]byte(obfsKey))
+	var key obfsAESKey
+	copy(key[:], sum[:obfsKeyLength])
+	return key
 }
 
-// newObfsConn wraps conn with the vendor obfs layer when obfsKey is not empty.
+// obfsWriter obfuscates the bytes of one upstream HTTP request body. Each
+// direction has its own wrapper (and therefore its own IV/preamble), matching
+// the vendor `obfsWriter`.
+type obfsWriter struct {
+	w   io.Writer
+	key obfsAESKey
+
+	mu     sync.Mutex
+	stream cipher.Stream
+	// err is sticky: a partial preamble/payload write leaves the CTR stream
+	// out of sync with the peer, so the body can never be resumed. Returning
+	// the same error keeps the upload failure visible instead of silently
+	// sending undecryptable bytes.
+	err error
+}
+
+// wrapObfsWriter wraps w with the vendor obfs layer when obfsKey is not empty.
 // Config.Validate rejects a missing key, so an empty obfsKey only reaches here
 // when the node explicitly disabled obfs (`obfs-key: ""`).
-func newObfsConn(conn net.Conn, obfsKey string) net.Conn {
+func wrapObfsWriter(w io.Writer, obfsKey string) io.Writer {
 	if obfsKey == "" {
-		return conn
+		return w
 	}
-	sum := sha256.Sum256([]byte(obfsKey))
-	c := &obfsConn{Conn: conn}
-	copy(c.key[:], sum[:obfsKeyLength])
-	return c
+	return &obfsWriter{w: w, key: deriveObfsKey(obfsKey)}
 }
 
-func (c *obfsConn) Read(b []byte) (int, error) {
-	c.readMu.Lock()
-	defer c.readMu.Unlock()
-	if c.readStream == nil {
-		if err := c.initRead(); err != nil {
-			// A bad preamble (or a short read) leaves the key stream unusable.
-			// Close the socket so neither half can keep using a conn that can
-			// never be decrypted instead of leaking it until a timeout.
-			_ = c.Conn.Close()
-			return 0, err
-		}
+func (w *obfsWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return 0, w.err
 	}
-	n, err := c.Conn.Read(b)
-	if n > 0 {
-		c.readStream.XORKeyStream(b[:n], b[:n])
-	}
-	return n, err
-}
-
-func (c *obfsConn) initRead() error {
-	var preamble [obfsPreamble]byte
-	if _, err := io.ReadFull(c.Conn, preamble[:]); err != nil {
-		return err
-	}
-	stream, err := newObfsStream(c.key[:], preamble[:obfsIVLength])
-	if err != nil {
-		return err
-	}
-	var tag [obfsTagLength]byte
-	stream.XORKeyStream(tag[:], preamble[obfsIVLength:])
-	// Constant-time tag check: OR the four bytes together and compare once, so
-	// the tag check does not leak how many leading bytes matched (a timing
-	// oracle on a keyed preamble is a bad habit even on TCP).
-	diff := tag[0] | tag[1] | tag[2] | tag[3]
-	if subtle.ConstantTimeByteEq(diff, 0) != 1 {
-		return errors.New(obfsKeyMismatch)
-	}
-	c.readStream = stream
-	return nil
-}
-
-func (c *obfsConn) Write(b []byte) (int, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if c.writeStream == nil {
+	if w.stream == nil {
 		var iv [obfsIVLength]byte
 		if _, err := rand.Read(iv[:]); err != nil {
+			w.err = err
 			return 0, err
 		}
-		stream, err := newObfsStream(c.key[:], iv[:])
+		stream, err := newObfsStream(w.key[:], iv[:])
 		if err != nil {
+			w.err = err
 			return 0, err
 		}
 		// tag = keystream(0^4); payload is encrypted with the continuation of
@@ -127,18 +112,103 @@ func (c *obfsConn) Write(b []byte) (int, error) {
 		payload := make([]byte, len(b))
 		stream.XORKeyStream(payload, b)
 		preamble = append(preamble, payload...)
-		if err := writeFull(c.Conn, preamble); err != nil {
+		if err := writeFull(w.w, preamble); err != nil {
+			w.err = err
 			return 0, err
 		}
-		c.writeStream = stream
+		w.stream = stream
 		return len(b), nil
 	}
 	payload := make([]byte, len(b))
-	c.writeStream.XORKeyStream(payload, b)
-	if err := writeFull(c.Conn, payload); err != nil {
+	w.stream.XORKeyStream(payload, b)
+	if err := writeFull(w.w, payload); err != nil {
+		w.err = err
 		return 0, err
 	}
 	return len(b), nil
+}
+
+// obfsReader deobfuscates one downstream HTTP response body, matching the
+// vendor `obfsReader`.
+type obfsReader struct {
+	r   io.Reader
+	key obfsAESKey
+
+	mu     sync.Mutex
+	stream cipher.Stream
+	err    error
+}
+
+func (r *obfsReader) Read(b []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return 0, r.err
+	}
+	if r.stream == nil {
+		if err := r.initRead(); err != nil {
+			// A bad preamble (or a short read) leaves the key stream unusable.
+			// Record it so neither half can keep retrying a stream that can
+			// never be decrypted.
+			r.err = err
+			return 0, err
+		}
+	}
+	n, err := r.r.Read(b)
+	if n > 0 {
+		r.stream.XORKeyStream(b[:n], b[:n])
+	}
+	return n, err
+}
+
+func (r *obfsReader) initRead() error {
+	var preamble [obfsPreamble]byte
+	if _, err := io.ReadFull(r.r, preamble[:]); err != nil {
+		return err
+	}
+	stream, err := newObfsStream(r.key[:], preamble[:obfsIVLength])
+	if err != nil {
+		return err
+	}
+	var tag [obfsTagLength]byte
+	stream.XORKeyStream(tag[:], preamble[obfsIVLength:])
+	// Constant-time tag check: OR the four bytes together and compare once, so
+	// the tag check does not leak how many leading bytes matched (a timing
+	// oracle on a keyed preamble is a bad habit even on a stream body).
+	diff := tag[0] | tag[1] | tag[2] | tag[3]
+	if subtle.ConstantTimeByteEq(diff, 0) != 1 {
+		return errors.New(obfsKeyMismatch)
+	}
+	r.stream = stream
+	return nil
+}
+
+// obfsReadCloser is the response-body wrapper handed to the stream reader. A
+// failed read closes the body so a corrupted obfs stream tears the HTTP stream
+// down immediately (fail-closed) instead of lingering.
+type obfsReadCloser struct {
+	*obfsReader
+	closer io.Closer
+}
+
+func (r *obfsReadCloser) Read(b []byte) (int, error) {
+	n, err := r.obfsReader.Read(b)
+	if err != nil {
+		_ = r.closer.Close()
+	}
+	return n, err
+}
+
+func (r *obfsReadCloser) Close() error {
+	return r.closer.Close()
+}
+
+// wrapObfsReader wraps r with the vendor obfs layer when obfsKey is not empty.
+func wrapObfsReader(r io.ReadCloser, obfsKey string) io.ReadCloser {
+	if obfsKey == "" {
+		return r
+	}
+	return &obfsReadCloser{obfsReader: &obfsReader{r: r, key: deriveObfsKey(obfsKey)}, closer: r}
 }
 
 func newObfsStream(key, iv []byte) (cipher.Stream, error) {
@@ -154,6 +224,9 @@ func writeFull(w io.Writer, b []byte) error {
 		n, err := w.Write(b)
 		if err != nil {
 			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
 		}
 		b = b[n:]
 	}

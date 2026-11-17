@@ -35,10 +35,14 @@ func (testDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 
 // echoBroker implements the server half of stream-up: a GET holds the download
 // stream open, a POST carries the upload bytes, and uploaded bytes are echoed
-// back on the download stream of the same session.
+// back on the download stream of the same session. When obfsKey is set the
+// broker applies the vendor obfs layer to both HTTP bodies, exactly like the
+// vendor server (body layer, after TLS).
 type echoBroker struct {
 	mu       sync.Mutex
 	sessions map[string]*echoSession
+
+	obfsKey string
 
 	muRecord     sync.Mutex
 	requests     []*http.Request
@@ -94,6 +98,9 @@ func (b *echoBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if flusher != nil {
 			flusher.Flush()
 		}
+		// The download body is obfuscated on the wire: write through the
+		// vendor obfs writer when the broker is configured with a key.
+		out := wrapObfsWriter(w, b.obfsKey)
 		s := b.session(session)
 		for {
 			select {
@@ -101,7 +108,7 @@ func (b *echoBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
-				if _, err := w.Write(chunk); err != nil {
+				if _, err := out.Write(chunk); err != nil {
 					return
 				}
 				if flusher != nil {
@@ -112,11 +119,13 @@ func (b *echoBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// Upload stream: read everything and mirror it to the download half.
+	// Upload stream: read everything and mirror it to the download half. The
+	// request body is obfuscated on the wire, so deobfuscate it first.
 	buf := make([]byte, 4096)
 	s := b.session(session)
+	body := wrapObfsReader(r.Body, b.obfsKey)
 	for {
-		n, err := r.Body.Read(buf)
+		n, err := body.Read(buf)
 		if n > 0 {
 			chunk := append([]byte(nil), buf[:n]...)
 			select {
@@ -351,10 +360,11 @@ func TestStreamOneRoundTrip(t *testing.T) {
 	roundTrip(t, conn, "single stream")
 }
 
-// TestTransportWrapsObfs pins the stack order: the obfs preamble precedes the
-// TLS record, so the very first bytes a server sees are the 20-byte obfs
-// preamble and not 0x16 0x03 (TLS handshake).
-func TestTransportWrapsObfs(t *testing.T) {
+// TestTransportObfsIsNotBelowTLS pins the layer order: the vendor obfs layer
+// lives on the HTTP bodies, so the first bytes a server sees must be a plain
+// TLS record (0x16 0x03), never the 20-byte obfs preamble. The dedicated line
+// endpoints complete a plain TLS handshake; wrapping the TCP conn breaks it.
+func TestTransportObfsIsNotBelowTLS(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -396,10 +406,100 @@ func TestTransportWrapsObfs(t *testing.T) {
 	if _, err := io.ReadFull(accepted, head); err != nil {
 		t.Fatalf("read head: %v", err)
 	}
-	if head[0] == 0x16 && head[1] == 0x03 {
-		t.Fatalf("first bytes look like a bare TLS record: %x (obfs layer missing)", head)
+	if head[0] != 0x16 || head[1] != 0x03 {
+		t.Fatalf("first bytes are %x, want a plain TLS record (0x16 0x03): obfs must not wrap the TCP conn", head)
 	}
 	<-dialErr
+}
+
+// TestStreamUpObfsOnHTTPBody is the positive half of the layer pin: a broker
+// that obfuscates only the HTTP bodies only interoperates when the client does
+// the same. It also exercises the split download endpoint.
+func TestStreamUpObfsOnHTTPBody(t *testing.T) {
+	const key = "9uByRBBiCy"
+	broker := newEchoBroker()
+	broker.obfsKey = key
+	server := newEchoServer(t, broker)
+	config := &Config{
+		Server:  serverSocksaddr(t, server),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamUp,
+		ObfsKey: obfsPtr(key),
+		Download: &DownloadOptions{
+			Server: serverSocksaddr(t, server),
+			TLS:    &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		},
+	}
+	client, err := NewClient(context.Background(), testDialer{}, config)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := client.DialContext(dialCtx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	roundTrip(t, conn, "obfs on bodies")
+}
+
+// TestStreamOneObfsOnHTTPBody pins the single-stream mode as well: one request
+// body (obfs writer) and one response body (obfs reader).
+func TestStreamOneObfsOnHTTPBody(t *testing.T) {
+	const key = "9uByRBBiCy"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rpcv2/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		out := wrapObfsWriter(w, key)
+		in := wrapObfsReader(r.Body, key)
+		buf := make([]byte, 4096)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 {
+				if _, werr := out.Write(buf[:n]); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	})
+	server := httptest.NewUnstartedServer(mux)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	config := &Config{
+		Server:  serverSocksaddr(t, server),
+		TLS:     &vmess.TLSConfig{Host: "localhost", SkipCertVerify: true},
+		Path:    "/rpcv2",
+		Mode:    ModeStreamOne,
+		ObfsKey: obfsPtr(key),
+	}
+	client, err := NewClient(context.Background(), testDialer{}, config)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+	conn, err := client.DialContext(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	roundTrip(t, conn, "stream one obfs")
 }
 
 // TestEndpointSelectsTransportByALPN pins the review fix: the node's `alpn`

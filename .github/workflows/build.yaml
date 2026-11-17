@@ -32,7 +32,7 @@ jobs:
           # --- Android: lite flavor, arm64-v8a only (covers virtually every phone).
           # `lite: true` => setup.dart gets --lite (drops easytier, tailscale,
           # zerotier, fake-tcp and gVisor) and the apk is named
-          # Bettbox-<ver>-android-lite-arm64-v8a.apk.
+          # Bettbox-<ver>-lite-android-arm64-v8a.apk.
           # No universal entry on purpose: the release lane only ships lite arm64.
           - platform: android
             os: ubuntu-24.04

@@ -76,6 +76,10 @@ const (
 	OIX
 	Juzi
 	Pure
+	// SNTPEclipse is the vendor's own transport (type `sntp-eclipse`, wire
+	// `sntp-eclipse-v3-native-1`): X25519 + XChaCha20-Poly1305 records over
+	// TCP. Appended at the end for the same reason as the types above.
+	SNTPEclipse
 )
 
 const (
@@ -288,6 +292,8 @@ func (at AdapterType) String() string {
 		return "Juzi"
 	case Pure:
 		return "Pure"
+	case SNTPEclipse:
+		return "SNTP"
 	case Relay:
 		return "Relay"
 	case Selector:

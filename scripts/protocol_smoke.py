@@ -68,6 +68,9 @@ PROTOCOLS = [
              tests=[("transport/vless", KERNEL)]),
     Protocol("pure", "pure", ["transport/vless", "adapter/outbound/vless.go"],
              tests=[("transport/vless", KERNEL)]),
+    Protocol("sntp-eclipse", "sntp-eclipse",
+             ["transport/sntp_eclipse", "adapter/outbound/sntp_eclipse.go"],
+             tests=[("transport/sntp_eclipse", KERNEL), ("adapter", KERNEL)]),
 ]
 
 # The shipped library is built from core/, so its go.mod must carry both

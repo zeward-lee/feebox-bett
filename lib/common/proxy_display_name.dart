@@ -27,6 +27,10 @@ const Map<String, String> proxyTypeDisplayNames = {
   'oix': 'OIX',
   'juzi': 'Juzi',
   'pure': 'Pure',
+  // 守候网络封端：配置里的 `type: sntp-eclipse`，内核 `AdapterType.String()`
+  // 报的是 `SNTP`（与 Fastup/Shanlian/ViewTurbo 同一套自报家门机制）。
+  'sntp-eclipse': 'SNTP',
+  'sntp': 'SNTP',
 };
 
 /// 把协议 type 转成展示用名字；未收录时原样返回。

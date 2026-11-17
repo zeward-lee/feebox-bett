@@ -196,7 +196,7 @@ jobs:
         working-directory: core/Clash.Meta
         run: |
           go build ./...
-          go test ./transport/x365/... ./transport/ninja/... ./transport/oppa/... ./transport/miu/... ./common/convert/... ./adapter/ -count=1
+          go test ./transport/x365/... ./transport/ninja/... ./transport/oppa/... ./transport/miu/... ./transport/sntp_eclipse/... ./common/convert/... ./adapter/ -count=1
 
       - name: Build Bettbox (Linux)
         if: matrix.platform == 'linux'
@@ -223,7 +223,7 @@ jobs:
           $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $core))
           $text = [System.Text.Encoding]::ASCII.GetString($bytes)
           Write-Host ("CORE " + $core + " size=" + $bytes.Length)
-          foreach ($k in @('fastup', 'x365', 'ninja', 'oppa', 'miu')) {
+          foreach ($k in @('fastup', 'x365', 'ninja', 'oppa', 'miu', 'sntp-eclipse')) {
             if ($text.Contains($k)) { Write-Host "MARKER OK  : $k" } else { Write-Host "MARKER MISS: $k" }
           }
 

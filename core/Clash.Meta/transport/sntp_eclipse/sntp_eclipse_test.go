@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -618,5 +619,81 @@ func TestDialRejectsBadConfig(t *testing.T) {
 	defer peer2.Close()
 	if _, err := Dial(self2, ClientConfig{Mode: NativeV3Mode, ServerPublicKey: "not-base64!", UUID: "x"}, Target{Host: "example.com"}); err == nil {
 		t.Fatal("bad server-public-key must be rejected")
+	}
+}
+
+// TestWriteFailureAdvancesCounterAndIsTerminal pins the write-side counter
+// semantics: the counter advances before the record reaches the wire, so a
+// failed write can never re-seal a record under a counter that was already used,
+// and the connection fails closed instead of retrying on an ambiguous record
+// boundary.
+func TestWriteFailureAdvancesCounterAndIsTerminal(t *testing.T) {
+	keys := [4][keySize]byte{}
+	for i := range keys {
+		keys[i][i] = byte(i + 1)
+	}
+	peer, self := net.Pipe()
+	conn, err := newTunnelConn(self, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// A closed peer makes the record write fail deterministically.
+	_ = peer.Close()
+
+	if _, err := conn.Write([]byte("hello")); err == nil {
+		t.Fatal("write to a closed peer succeeded")
+	}
+	if conn.writeCtr != 1 {
+		t.Fatalf("writeCtr = %d after a failed record, want 1 (advanced before the write)", conn.writeCtr)
+	}
+	firstErr := conn.writeErr
+	if firstErr == nil {
+		t.Fatal("failed write did not record a terminal error")
+	}
+	// A retry must not seal another record under a fresh counter: the stream is
+	// already ambiguous, so the sticky error wins.
+	if _, err := conn.Write([]byte("hello")); !errors.Is(err, firstErr) {
+		t.Fatalf("retry error = %v, want the sticky %v", err, firstErr)
+	}
+	if conn.writeCtr != 1 {
+		t.Fatalf("writeCtr = %d after a rejected retry, want 1", conn.writeCtr)
+	}
+}
+
+// TestReadFailureAdvancesCounterAndIsTerminal pins the read-side counterpart: an
+// authenticated header consumes its counter even when the body never arrives,
+// and the failure is terminal so a retry can not resynchronise on garbage.
+func TestReadFailureAdvancesCounterAndIsTerminal(t *testing.T) {
+	keys := [4][keySize]byte{}
+	for i := range keys {
+		keys[i][i] = byte(i + 1)
+	}
+	peer, self := net.Pipe()
+	conn, err := newTunnelConn(self, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	go func() {
+		// Authenticated header advertising 60000 body bytes, then EOF.
+		hdrAEAD, _ := newAEAD(keys[2])
+		header := hdrAEAD.Seal(nil, recordNonce(0), []byte{0xea, 0x60}, nil)
+		_, _ = peer.Write(header)
+		_ = peer.Close()
+	}()
+	if _, err := conn.Read(make([]byte, 16)); err == nil {
+		t.Fatal("truncated record body must fail")
+	}
+	if conn.readCtr != 1 {
+		t.Fatalf("readCtr = %d after a truncated record, want 1", conn.readCtr)
+	}
+	firstErr := conn.readErr
+	if firstErr == nil {
+		t.Fatal("failed read did not record a terminal error")
+	}
+	if _, err := conn.Read(make([]byte, 16)); !errors.Is(err, firstErr) {
+		t.Fatalf("retry error = %v, want the sticky %v", err, firstErr)
 	}
 }

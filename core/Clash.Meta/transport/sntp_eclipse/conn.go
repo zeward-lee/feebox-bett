@@ -44,6 +44,14 @@ type Conn struct {
 	readCtr    uint64
 	readBuffer []byte
 	closed     bool
+
+	// writeErr/readErr are terminal per direction. A record that fails half way
+	// through leaves the AEAD-framed stream ambiguous, so the counter can not be
+	// rewound and the connection must not retry: every later call returns the
+	// stored error instead of sealing/opening another record on a desynced
+	// stream (which could also reuse a counter value).
+	writeErr error
+	readErr  error
 }
 
 // Dial performs the hello exchange on an already connected TCP socket and
@@ -191,9 +199,15 @@ func (c *Conn) Read(b []byte) (int, error) {
 	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
+	if c.readErr != nil {
+		return 0, c.readErr
+	}
 	for len(c.readBuffer) == 0 {
 		payload, err := c.readRecord()
 		if err != nil {
+			// The record stream is unusable after a framing/authentication error;
+			// keep the first error so a retry can not resynchronise on garbage.
+			c.readErr = err
 			return 0, err
 		}
 		if len(payload) == 0 {
@@ -220,6 +234,12 @@ func (c *Conn) readRecord() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The header authenticated, so this record owns the counter even if the body
+	// never arrives. Advance before any further I/O: the next record was sealed
+	// by the peer under the next counter, and retrying under the old one would
+	// desync the stream (Read also marks the read side terminal on error).
+	ctr := c.readCtr
+	c.readCtr++
 	if bodyLen < 2+chachaOverhead || bodyLen > maxRecordBody {
 		return nil, fmt.Errorf("sntp-eclipse: record body length %d out of range", bodyLen)
 	}
@@ -227,11 +247,10 @@ func (c *Conn) readRecord() ([]byte, error) {
 	if _, err := io.ReadFull(c.Conn, body); err != nil {
 		return nil, err
 	}
-	plain, err := openBody(c.readBody, c.readCtr, nil, header, body)
+	plain, err := openBody(c.readBody, ctr, nil, header, body)
 	if err != nil {
 		return nil, err
 	}
-	c.readCtr++
 	payloadLen := int(binary.BigEndian.Uint16(plain[0:2]))
 	if payloadLen > len(plain)-2 {
 		return nil, fmt.Errorf("sntp-eclipse: record payload length %d exceeds body %d", payloadLen, len(plain)-2)
@@ -248,6 +267,9 @@ func (c *Conn) Write(b []byte) (int, error) {
 	if c.closed {
 		return 0, net.ErrClosed
 	}
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
 	written := 0
 	for written < len(b) {
 		end := written + maxPayloadPerRecord
@@ -259,11 +281,18 @@ func (c *Conn) Write(b []byte) (int, error) {
 		binary.BigEndian.PutUint16(plain, uint16(len(payload)))
 		plain = append(plain, payload...)
 
-		record := sealRecord(c.writeHdr, c.writeBody, c.writeCtr, nil, plain)
-		if _, err := writeFull(c.Conn, record); err != nil {
-			return written, err
-		}
+		// Advance before the write, not after: the counter is the nonce prefix,
+		// so a record that reaches the wire (even partially) must never be
+		// sealed again under the same counter. A failed write leaves the record
+		// boundary ambiguous, so the error is stored and every later Write fails
+		// instead of retrying on a desynced stream.
+		ctr := c.writeCtr
 		c.writeCtr++
+		record := sealRecord(c.writeHdr, c.writeBody, ctr, nil, plain)
+		if _, err := writeFull(c.Conn, record); err != nil {
+			c.writeErr = fmt.Errorf("sntp-eclipse: write record (counter=%d): %w", ctr, err)
+			return written, c.writeErr
+		}
 		written = end
 	}
 	return written, nil

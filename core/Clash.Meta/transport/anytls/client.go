@@ -36,15 +36,11 @@ type ClientConfig struct {
 
 type Client struct {
 	passwordSha256 []byte
-	// directAuth marks the vendor direct authentication form (bare 32 hex
-	// password): the first packet is the bare 32-byte hash, with no padding
-	// length and no padding bytes.
-	directAuth    bool
-	tlsConfig     *vmess.TLSConfig
-	dialer        N.Dialer
-	server        M.Socksaddr
-	sessionClient *session.Client
-	padding       atomic.Pointer[padding.PaddingFactory]
+	tlsConfig      *vmess.TLSConfig
+	dialer         N.Dialer
+	server         M.Socksaddr
+	sessionClient  *session.Client
+	padding        atomic.Pointer[padding.PaddingFactory]
 }
 
 // ShanlianPasswordMarker is the suffix the vendor client puts on a Shanlian
@@ -74,23 +70,6 @@ func decodeClientPassword(password string) ([]byte, error) {
 	return hash[:], nil
 }
 
-// directAuthPasswordLength is the length of the vendor's direct-authentication
-// password: the raw 32 hex character key the Shanlian subscription publishes.
-const directAuthPasswordLength = 32
-
-// isDirectAuthPassword reports whether password is the vendor's direct
-// authentication form, i.e. a bare 32 hex character key without the "#sl"
-// marker. That is the only spelling whose first packet the live servers accept
-// without the 2-byte padding length (see writeFirstPacket); the "#sl" variant
-// and every ordinary anytls password keep the upstream prefix.
-func isDirectAuthPassword(password string) bool {
-	if len(password) != directAuthPasswordLength || IsShanlianPassword(password) {
-		return false
-	}
-	_, err := hex.DecodeString(password)
-	return err == nil
-}
-
 func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 	password, err := decodeClientPassword(config.Password)
 	if err != nil {
@@ -98,7 +77,6 @@ func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 	}
 	c := &Client{
 		passwordSha256: password,
-		directAuth:     isDirectAuthPassword(config.Password),
 		tlsConfig:      config.TLSConfig,
 		dialer:         config.Dialer,
 		server:         config.Server,
@@ -144,28 +122,26 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 // writeFirstPacket writes the anytls handshake prefix that precedes the first
 // frame (the session client sends the settings frame right after this returns).
 //
-// Upstream sing-anytls sends `[32B sha256(password)][2B padding length]
-// [padding]`. The live Shanlian servers reject that prefix for their direct
-// authentication form: a connection that sends the bare 32-byte hash stays
-// alive, while the same connection plus the 2 padding bytes is closed within
-// ~0.1s (parity/probe_anytls_prefix_semantics.py, 10 variants). So the vendor
-// direct authentication path (bare 32 hex password) sends the bare hash, and
-// the "#sl" marker variant plus ordinary anytls passwords keep the upstream
-// prefix unchanged.
+// The prefix is `[32B sha256(password)][2B big endian padding length][padding]`,
+// i.e. the upstream sing-anytls v0.0.11 layout. The vendor client embeds
+// sing-anytls v0.0.11 with the default padding scheme `0=30-30`, so its first
+// packet is always 64 bytes plaintext (32 + 2 + 30) and the matching TLS record
+// carries a payload length of 81 (64 + 1 inner content type + 16 AEAD tag).
+// The official capture (capture-official-20261117, 5/5 connections) confirms
+// that exact shape for the bare 32 hex character password as well, so this
+// vendor form must not skip the padding suffix.
 func (c *Client) writeFirstPacket(w io.Writer) (int64, error) {
 	b := buf.NewPacket()
 	defer b.Release()
 
 	b.Write(c.passwordSha256)
-	if !c.directAuth {
-		var paddingLen int
-		if pad := c.padding.Load().GenerateRecordPayloadSizes(0); len(pad) > 0 {
-			paddingLen = pad[0]
-		}
-		binary.BigEndian.PutUint16(b.Extend(2), uint16(paddingLen))
-		if paddingLen > 0 {
-			b.WriteZeroN(paddingLen)
-		}
+	var paddingLen int
+	if pad := c.padding.Load().GenerateRecordPayloadSizes(0); len(pad) > 0 {
+		paddingLen = pad[0]
+	}
+	binary.BigEndian.PutUint16(b.Extend(2), uint16(paddingLen))
+	if paddingLen > 0 {
+		b.WriteZeroN(paddingLen)
 	}
 	return b.WriteTo(w)
 }

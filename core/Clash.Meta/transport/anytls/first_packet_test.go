@@ -14,8 +14,10 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,98 +27,97 @@ import (
 	N "github.com/metacubex/sing/common/network"
 )
 
-const directAuthFixture = "720a437f4beb4fb9915f7f913d7bc9f7"
-
-// TestFirstPacketDirectAuthIsBareHash pins the wire prefix of the vendor direct
-// authentication form: exactly the 32-byte SHA-256 of the 32 hex character
-// password, with no 2-byte padding length and no padding behind it. The live
-// servers close the connection within ~0.1s when those extra bytes are present.
-func TestFirstPacketDirectAuthIsBareHash(t *testing.T) {
-	prefix, extra := captureFirstPacket(t, directAuthFixture)
-	want := sha256.Sum256([]byte(directAuthFixture))
-	if !bytes.Equal(prefix, want[:]) {
-		t.Fatalf("first packet = %x, want %x", prefix, want)
-	}
-	if len(extra) != 0 {
-		t.Fatalf("direct auth sent %d extra bytes after the bare hash: %x", len(extra), extra)
-	}
-}
-
-// TestFirstPacketMarkerKeepsUpstreamPrefix pins the "#sl" variant: the 64 hex
-// key is decoded and keeps the upstream `[2B padding length][padding]` suffix,
-// so the existing vendor marker path is unchanged.
-func TestFirstPacketMarkerKeepsUpstreamPrefix(t *testing.T) {
-	password := shanlianFixture + "#sl"
-	prefix, extra := captureFirstPacket(t, password)
-	want, _ := hex.DecodeString(shanlianFixture)
-	if !bytes.Equal(prefix, want) {
-		t.Fatalf("first packet = %x, want %x", prefix, want)
-	}
-	if len(extra) < 2 {
-		t.Fatalf("marker variant sent %d bytes total, want 32-byte hash + padding prefix", len(prefix)+len(extra))
-	}
-	wantLen := defaultFirstPacketPadding + 2
-	if len(extra) != wantLen {
-		t.Fatalf("marker variant suffix = %d bytes, want %d (2-byte length + padding)", len(extra), wantLen)
-	}
-	if got := binary.BigEndian.Uint16(extra[:2]); int(got) != defaultFirstPacketPadding {
-		t.Fatalf("padding length = %d, want %d", got, defaultFirstPacketPadding)
-	}
-	for i, b := range extra[2:] {
-		if b != 0 {
-			t.Fatalf("padding byte %d = %#x, want 0", i, b)
-		}
-	}
-}
-
-// TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix pins that a standard
-// anytls password (not the 32 hex vendor form) keeps the upstream prefix byte
-// for byte, so upstream anytls nodes are unaffected.
-func TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix(t *testing.T) {
-	const password = "ordinary-password"
-	prefix, extra := captureFirstPacket(t, password)
-	want := sha256.Sum256([]byte(password))
-	if !bytes.Equal(prefix, want[:]) {
-		t.Fatalf("first packet = %x, want %x", prefix, want)
-	}
-	if len(extra) != defaultFirstPacketPadding+2 {
-		t.Fatalf("suffix = %d bytes, want %d", len(extra), defaultFirstPacketPadding+2)
-	}
-	if got := binary.BigEndian.Uint16(extra[:2]); int(got) != defaultFirstPacketPadding {
-		t.Fatalf("padding length = %d, want %d", got, defaultFirstPacketPadding)
-	}
-}
-
-// TestDirectAuthPasswordShape pins the discriminator: only a bare 32 hex
-// character key takes the direct authentication path.
-func TestDirectAuthPasswordShape(t *testing.T) {
-	cases := map[string]bool{
-		directAuthFixture:                   true,
-		"ABCDEF0123456789ABCDEF0123456789":  true,
-		shanlianFixture + "#sl":             false,
-		shanlianFixture + "#SL":             false,
-		"short-password":                    false,
-		"not-hex-at-all-but-32-chars-long!": false,
-		directAuthFixture + "0":             false,
-	}
-	for password, want := range cases {
-		if got := isDirectAuthPassword(password); got != want {
-			t.Errorf("isDirectAuthPassword(%q) = %v, want %v", password, got, want)
-		}
-	}
-}
+// vendorHexPassword is the vendor's bare 32 hex character password form, the
+// one the Shanlian subscription publishes without the "#sl" marker.
+const vendorHexPassword = "720a437f4beb4fb9915f7f913d7bc9f7"
 
 // defaultFirstPacketPadding is the padding length of the vendor default scheme
 // entry `0=30-30`.
 const defaultFirstPacketPadding = 30
 
+// firstPacketPlaintextLen is the plaintext length of the first packet that
+// official sing-anytls v0.0.11 emits: 32B credential + 2B padding length + 30B
+// zero padding. The official capture shows 5/5 connections with this shape.
+const firstPacketPlaintextLen = sha256.Size + 2 + defaultFirstPacketPadding
+
+// firstPacketRecordLen is the TLS 1.3 application_data record payload length
+// (the length field, i.e. what a capture prints as "23(81)"): plaintext plus
+// the 1-byte inner content type and the 16-byte AEAD tag.
+const firstPacketRecordLen = firstPacketPlaintextLen + 17
+
+// TestFirstPacketVendorHexPasswordMatchesOfficialCapture pins the vendor bare
+// 32 hex password form to the upstream sing-anytls v0.0.11 first packet: a 64
+// byte plaintext `[32B sha256(password)][0x001e][30 * 0x00]`, which on the wire
+// is an application_data record with payload length 81. The official client
+// sends exactly this for every connection observed in capture-official-20261117
+// (5/5 records were 23(81)).
+func TestFirstPacketVendorHexPasswordMatchesOfficialCapture(t *testing.T) {
+	want := sha256.Sum256([]byte(vendorHexPassword))
+	assertUpstreamFirstPacket(t, vendorHexPassword, want[:])
+}
+
+// TestFirstPacketMarkerKeepsUpstreamPrefix pins the "#sl" variant: the 64 hex
+// key is decoded and keeps the same 64 byte upstream layout, so the existing
+// vendor marker path is unchanged.
+func TestFirstPacketMarkerKeepsUpstreamPrefix(t *testing.T) {
+	want, err := hex.DecodeString(shanlianFixture)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	assertUpstreamFirstPacket(t, shanlianFixture+"#sl", want)
+}
+
+// TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix pins that a standard
+// anytls password (neither the 32 hex vendor form nor the "#sl" marker) keeps
+// the upstream layout byte for byte, so upstream anytls nodes are unaffected.
+func TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix(t *testing.T) {
+	const password = "ordinary-password"
+	want := sha256.Sum256([]byte(password))
+	assertUpstreamFirstPacket(t, password, want[:])
+}
+
+// assertUpstreamFirstPacket captures the real first packet for password and
+// asserts both the plaintext layout and the TLS record payload length.
+func assertUpstreamFirstPacket(t *testing.T, password string, wantCredential []byte) {
+	t.Helper()
+	if len(wantCredential) != sha256.Size {
+		t.Fatalf("credential fixture is %d bytes, want %d", len(wantCredential), sha256.Size)
+	}
+	plaintext, appRecordLens := captureFirstPacket(t, password)
+
+	if len(plaintext) != firstPacketPlaintextLen {
+		t.Fatalf("first packet plaintext = %d bytes (%x), want %d bytes",
+			len(plaintext), plaintext, firstPacketPlaintextLen)
+	}
+	if !bytes.Equal(plaintext[:sha256.Size], wantCredential) {
+		t.Fatalf("credential = %x, want %x", plaintext[:sha256.Size], wantCredential)
+	}
+	if got := binary.BigEndian.Uint16(plaintext[sha256.Size : sha256.Size+2]); int(got) != defaultFirstPacketPadding {
+		t.Fatalf("padding length = %d, want %d", got, defaultFirstPacketPadding)
+	}
+	for i, b := range plaintext[sha256.Size+2:] {
+		if b != 0 {
+			t.Fatalf("padding byte %d = %#x, want 0", i, b)
+		}
+	}
+	if got := appRecordLens[len(appRecordLens)-1]; got != firstPacketRecordLen {
+		t.Fatalf("first packet application_data record length = %d (all records %v), want %d",
+			got, appRecordLens, firstPacketRecordLen)
+	}
+}
+
 // captureFirstPacket runs one real TLS handshake against a loopback server and
-// returns the first 32 bytes the server received plus whatever followed within
-// a short grace period.
-func captureFirstPacket(t *testing.T, password string) (prefix, extra []byte) {
+// returns the plaintext the server received within a short grace period, plus
+// the payload length of every application_data record on the wire.
+//
+// The TLS 1.3 client Finished is itself an application_data record (69 bytes
+// with a SHA-384 suite as in the capture, 53 with SHA-256 as negotiated against
+// the test server), so the first packet is the last record captured here: the
+// only thing this path writes after the handshake.
+func captureFirstPacket(t *testing.T, password string) (plaintext []byte, appRecordLens []int) {
 	t.Helper()
 	serverTLS, serverName := testServerTLSConfig(t)
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", serverTLS)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -155,38 +156,39 @@ func captureFirstPacket(t *testing.T, password string) (prefix, extra []byte) {
 		connReady <- conn
 	}()
 
-	accepted, err := listener.Accept()
+	raw, err := listener.Accept()
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	defer accepted.Close()
-	_ = accepted.SetReadDeadline(time.Now().Add(5 * time.Second))
-	prefix = make([]byte, sha256.Size)
-	if _, err := readFull(accepted, prefix); err != nil {
-		t.Fatalf("read first packet: %v", err)
+	defer raw.Close()
+	recorder := &recordingConn{Conn: raw}
+	server := tls.Server(recorder, serverTLS)
+	_ = server.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := server.Handshake(); err != nil {
+		t.Fatalf("server handshake: %v", err)
 	}
-	// Grace window: nothing else may follow the prefix on the wire. The client
-	// conn stays open until it is closed below, so a timeout means "no more
-	// bytes", not "peer hung up".
-	_ = accepted.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+
+	// Grace window: read whatever plaintext arrives, then require a timeout so
+	// "no more bytes" is distinguishable from "peer hung up".
+	_ = server.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	buf := make([]byte, 512)
-	n, err := accepted.Read(buf)
-	if err == nil {
-		extra = append(extra, buf[:n]...)
-		// Drain whatever else is already buffered so the assertion is stable.
-		for len(extra) < 512 {
-			n, err = accepted.Read(buf)
-			if err != nil {
+	for {
+		n, readErr := server.Read(buf)
+		if n > 0 {
+			plaintext = append(plaintext, buf[:n]...)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			extra = append(extra, buf[:n]...)
-		}
-	} else {
-		var netErr net.Error
-		if !errors.As(err, &netErr) || !netErr.Timeout() {
-			t.Fatalf("unexpected read error after first packet: %v", err)
+			var netErr net.Error
+			if errors.As(readErr, &netErr) && netErr.Timeout() {
+				break
+			}
+			t.Fatalf("unexpected read error after first packet: %v", readErr)
 		}
 	}
+
 	select {
 	case conn := <-connReady:
 		_ = conn.Close()
@@ -195,19 +197,55 @@ func captureFirstPacket(t *testing.T, password string) (prefix, extra []byte) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("outbound connection was never established")
 	}
-	return prefix, extra
+
+	return plaintext, applicationDataRecordLens(t, recorder.bytes())
 }
 
-func readFull(r net.Conn, b []byte) (int, error) {
-	done := 0
-	for done < len(b) {
-		n, err := r.Read(b[done:])
-		done += n
-		if err != nil {
-			return done, err
+// applicationDataRecordLens parses the recorded TLS stream and returns the
+// payload length (the length field a capture prints as "23(N)") of every
+// application_data record in order.
+func applicationDataRecordLens(t *testing.T, wire []byte) []int {
+	t.Helper()
+	var lens []int
+	for i := 0; i+5 <= len(wire); {
+		typ := wire[i]
+		length := int(binary.BigEndian.Uint16(wire[i+3 : i+5]))
+		if length > 18432 || i+5+length > len(wire) {
+			break
 		}
+		if typ == 0x17 {
+			lens = append(lens, length)
+		}
+		i += 5 + length
 	}
-	return done, nil
+	if len(lens) == 0 {
+		t.Fatalf("no complete application_data record in %d recorded bytes: %x", len(wire), wire)
+	}
+	return lens
+}
+
+// recordingConn tees every byte read from the wire so the test can parse the
+// TLS records that a tls.Conn consumed.
+type recordingConn struct {
+	net.Conn
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (c *recordingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.mu.Lock()
+		c.buf = append(c.buf, p[:n]...)
+		c.mu.Unlock()
+	}
+	return n, err
+}
+
+func (c *recordingConn) bytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.buf...)
 }
 
 type directDialer struct{}

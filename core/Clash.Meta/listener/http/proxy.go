@@ -121,7 +121,11 @@ func HandleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...
 				}
 				resp, err = client.Do(request)
 				if err != nil {
-					log.Warnln("HTTP inbound %s %s://%s failed: %v", request.Method, request.URL.Scheme, request.URL.Host, err)
+					target := request.URL.Hostname()
+					if port := request.URL.Port(); port != "" {
+						target = net.JoinHostPort(target, port)
+					}
+					log.Warnln("HTTP inbound %s %s://%s failed: %v", request.Method, request.URL.Scheme, target, err)
 					resp = responseWith(request, http.StatusBadGateway)
 				}
 			}

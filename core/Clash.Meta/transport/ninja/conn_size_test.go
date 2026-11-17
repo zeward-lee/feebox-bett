@@ -224,3 +224,89 @@ func TestSplitPayloadPaddingRange(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteAfterReadKeepsOwnCipherState guards the shared-cipher-state bug:
+// readHeader used to adopt the peer salt into the same AEAD/nonce the writer
+// used, so every chunk written after the first read was sealed with the peer
+// key and an advanced nonce. Plain HTTP put the whole request in the first
+// block and worked; TLS broke right after the handshake. A session must stay
+// usable when writes and reads interleave.
+func TestWriteAfterReadKeepsOwnCipherState(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	srv, err := NewServer(testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type sres struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan sres, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			ch <- sres{err: err}
+			return
+		}
+		c, _, _, err := srv.Handshake(raw)
+		ch <- sres{c: c, err: err}
+	}()
+
+	cli, err := NewClient(testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cli.StreamConn(raw, "example.com", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) first write is carried by the tunnel header
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	s := <-ch
+	if s.err != nil {
+		t.Fatalf("handshake: %v", s.err)
+	}
+	defer s.c.Close()
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(s.c, got); err != nil || string(got) != "ping" {
+		t.Fatalf("server first read: %q err=%v", got, err)
+	}
+
+	// 2) the server sends two records; the client reads only the first one
+	if _, err := s.c.Write([]byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.c.Write([]byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(c, got[:3]); err != nil || string(got[:3]) != "one" {
+		t.Fatalf("client read one: %q err=%v", got[:3], err)
+	}
+
+	// 3) client writes after reading; must still use its own key and nonce
+	if _, err := c.Write([]byte("after")); err != nil {
+		t.Fatalf("write after read: %v", err)
+	}
+	want := make([]byte, 5)
+	if _, err := io.ReadFull(s.c, want); err != nil || string(want) != "after" {
+		t.Fatalf("server read after response: %q err=%v", want, err)
+	}
+
+	// 4) the pending second record is still readable, so neither direction
+	// consumed the other's nonce
+	if _, err := io.ReadFull(c, got[:3]); err != nil || string(got[:3]) != "two" {
+		t.Fatalf("client read two: %q err=%v", got[:3], err)
+	}
+}

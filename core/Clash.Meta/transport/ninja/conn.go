@@ -229,8 +229,14 @@ func (s *state) open(dst, ciphertext []byte) ([]byte, error) {
 type Conn struct {
 	net.Conn
 
-	cfg  *Config
-	st   *state
+	cfg *Config
+	// wst and rst are the independent write and read cipher states. They must
+	// never be shared: the read side adopts the peer salt, which replaces the
+	// AEAD key and resets the nonce, so a shared state would encrypt every
+	// post-handshake write with the peer's key (broken Finished/GET after the
+	// TLS handshake, while a single-write HTTP request still worked).
+	wst  *state
+	rst  *state
 	br   *bufio.Reader
 	lock sync.Mutex
 
@@ -256,27 +262,34 @@ func NewConn(raw net.Conn, cfg *Config, initiator bool) *Conn {
 		role = 1
 	}
 	c := &Conn{Conn: raw, cfg: cfg, br: bufio.NewReaderSize(raw, 16*1024)}
-	st, err := newState(cfg, role)
+	wst, err := newState(cfg, role)
 	if err != nil {
 		c.rerr = err
 		return c
 	}
-	c.st = st
+	rst, err := newState(cfg, role)
+	if err != nil {
+		c.rerr = err
+		return c
+	}
+	c.wst, c.rst = wst, rst
 	return c
 }
 
 func binBE16(b []byte, v uint16) { binary.BigEndian.PutUint16(b, v) }
 
 // responderHeaderLen is the plaintext size of the responder's first record:
-// role(1) || token(16) || unix ms(8) || total(2) || pad(2).
-const responderHeaderLen = 1 + tokenLen + 8 + 2 + 2
+// role(1) || unix ms(8) || token(16) || total(2) || pad(2). The field order was
+// verified against a decrypted reference-core response header (the timestamp
+// sits at bytes 1..9); total/pad keep the same offsets either way.
+const responderHeaderLen = 1 + 8 + tokenLen + 2 + 2
 
 // writeResponderHeader emits salt || sealed(header) || sealed(payload).
 //
 // The responder uses a self describing first record: its total length only
 // depends on the method, so the initiator can read it in one shot.
 func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
-	if err := c.st.init(); err != nil {
+	if err := c.wst.init(); err != nil {
 		return 0, err
 	}
 	pad := c.cfg.Padding.PaddingLen(len(payload))
@@ -287,9 +300,9 @@ func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
 		pad = 0xffff
 	}
 	hdr := make([]byte, responderHeaderLen)
-	hdr[0] = c.st.role
-	copy(hdr[1:1+tokenLen], c.st.banner)
-	binary.BigEndian.PutUint64(hdr[1+tokenLen:9+tokenLen], uint64(time.Now().UnixMilli()))
+	hdr[0] = c.wst.role
+	binary.BigEndian.PutUint64(hdr[1:9], uint64(time.Now().UnixMilli()))
+	copy(hdr[9:9+tokenLen], c.wst.banner)
 	binBE16(hdr[9+tokenLen:11+tokenLen], uint16(len(payload)+pad))
 	binBE16(hdr[11+tokenLen:], uint16(pad))
 
@@ -302,10 +315,10 @@ func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
 		}
 		body = append(body, p...)
 	}
-	sealedHdr := c.st.seal(nil, hdr)
-	sealedBody := c.st.seal(nil, body)
-	out := make([]byte, 0, len(c.st.salt)+len(sealedHdr)+len(sealedBody))
-	out = append(out, c.st.salt...)
+	sealedHdr := c.wst.seal(nil, hdr)
+	sealedBody := c.wst.seal(nil, body)
+	out := make([]byte, 0, len(c.wst.salt)+len(sealedHdr)+len(sealedBody))
+	out = append(out, c.wst.salt...)
 	out = append(out, sealedHdr...)
 	out = append(out, sealedBody...)
 	if _, err := c.Conn.Write(out); err != nil {
@@ -318,7 +331,7 @@ func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
 // dstAddr is the socks5 encoded destination; pass nil when responding. pad is
 // the planned padding length (see planFirstBlock), not recomputed here.
 func (c *Conn) writeHeader(dstAddr []byte, pad int, firstPayload []byte) error {
-	if err := c.st.init(); err != nil {
+	if err := c.wst.init(); err != nil {
 		return err
 	}
 	if pad < 0 {
@@ -343,16 +356,16 @@ func (c *Conn) writeHeader(dstAddr []byte, pad int, firstPayload []byte) error {
 
 	meta := make([]byte, metaLen)
 	meta[0] = 0
-	meta[1] = c.st.role
+	meta[1] = c.wst.role
 	binary.BigEndian.PutUint64(meta[2:10], uint64(time.Now().UnixMilli()))
 	binBE16(meta[10:12], uint16(len(first)))
 
-	sealedMeta := c.st.seal(nil, meta)
-	sealedFirst := c.st.seal(nil, first)
+	sealedMeta := c.wst.seal(nil, meta)
+	sealedFirst := c.wst.seal(nil, first)
 
-	out := make([]byte, 0, len(c.st.salt)+tokenLen+len(sealedMeta)+len(sealedFirst))
-	out = append(out, c.st.salt...)
-	out = append(out, c.st.banner...)
+	out := make([]byte, 0, len(c.wst.salt)+tokenLen+len(sealedMeta)+len(sealedFirst))
+	out = append(out, c.wst.salt...)
+	out = append(out, c.wst.banner...)
 	out = append(out, sealedMeta...)
 	out = append(out, sealedFirst...)
 	_, err := c.Conn.Write(out)
@@ -369,7 +382,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 		return 0, c.rerr
 	}
 	if !c.wroteHeader {
-		if c.st.role == 2 {
+		if c.wst.role == 2 {
 			// responder: carry the whole write inside the header record
 			n, err := c.writeResponderHeader(b)
 			c.wroteHeader = true
@@ -428,8 +441,8 @@ func (c *Conn) writeOneChunk(payload []byte) error {
 		}
 		body = append(body, p...)
 	}
-	sealedHdr := c.st.seal(nil, hdr)
-	sealedBody := c.st.seal(nil, body)
+	sealedHdr := c.wst.seal(nil, hdr)
+	sealedBody := c.wst.seal(nil, body)
 	out := make([]byte, 0, len(sealedHdr)+len(sealedBody))
 	out = append(out, sealedHdr...)
 	out = append(out, sealedBody...)
@@ -445,23 +458,23 @@ func (c *Conn) readHeader() error {
 	if c.headerRead {
 		return nil
 	}
-	if c.st == nil {
+	if c.rst == nil || c.wst == nil {
 		return c.rerr
 	}
 	salt := make([]byte, c.cfg.Method.KeyLen())
 	if _, err := io.ReadFull(c.br, salt); err != nil {
 		return err
 	}
-	if err := c.st.adopt(salt); err != nil {
+	if err := c.rst.adopt(salt); err != nil {
 		return err
 	}
-	if c.st.role == 1 {
+	if c.rst.role == 1 {
 		// initiator reads the responder header record
 		rec := make([]byte, responderHeaderLen+c.cfg.Method.Overhead())
 		if _, err := io.ReadFull(c.br, rec); err != nil {
 			return err
 		}
-		plain, err := c.st.open(nil, rec)
+		plain, err := c.rst.open(nil, rec)
 		if err != nil {
 			return fmt.Errorf("ninja: open response header: %w", err)
 		}
@@ -474,7 +487,7 @@ func (c *Conn) readHeader() error {
 		if _, err := io.ReadFull(c.br, bodyRec); err != nil {
 			return err
 		}
-		body, err := c.st.open(nil, bodyRec)
+		body, err := c.rst.open(nil, bodyRec)
 		if err != nil {
 			return fmt.Errorf("ninja: open response body: %w", err)
 		}
@@ -489,10 +502,10 @@ func (c *Conn) readHeader() error {
 		return err
 	}
 	token := first[:tokenLen]
-	if !c.cfg.Method.verifyToken(c.st.psk, c.st.tokenPSK, salt, token) {
+	if !c.cfg.Method.verifyToken(c.rst.psk, c.rst.tokenPSK, salt, token) {
 		return fmt.Errorf("ninja: bad peer token")
 	}
-	meta, err := c.st.open(nil, first[tokenLen:])
+	meta, err := c.rst.open(nil, first[tokenLen:])
 	if err != nil {
 		return fmt.Errorf("ninja: open meta: %w", err)
 	}
@@ -504,13 +517,13 @@ func (c *Conn) readHeader() error {
 	if _, err := io.ReadFull(c.br, rec); err != nil {
 		return err
 	}
-	block, err := c.st.open(nil, rec)
+	block, err := c.rst.open(nil, rec)
 	if err != nil {
 		return fmt.Errorf("ninja: open first block: %w", err)
 	}
 	// The initiator sends the destination address inside its first block; the
 	// responder's first block only carries padding and payload.
-	if c.st.role == 2 {
+	if c.rst.role == 2 {
 		c.remoteAddr, c.payload, err = splitPayload(block)
 	} else {
 		c.remoteAddr, c.payload, err = splitPayloadNoAddr(block)
@@ -595,7 +608,7 @@ func (c *Conn) readChunk() error {
 	if _, err := io.ReadFull(c.br, hdr); err != nil {
 		return err
 	}
-	plain, err := c.st.open(nil, hdr)
+	plain, err := c.rst.open(nil, hdr)
 	if err != nil {
 		return fmt.Errorf("ninja: open chunk header: %w", err)
 	}
@@ -608,7 +621,7 @@ func (c *Conn) readChunk() error {
 	if _, err := io.ReadFull(c.br, body); err != nil {
 		return err
 	}
-	plain, err = c.st.open(nil, body)
+	plain, err = c.rst.open(nil, body)
 	if err != nil {
 		return fmt.Errorf("ninja: open chunk body: %w", err)
 	}

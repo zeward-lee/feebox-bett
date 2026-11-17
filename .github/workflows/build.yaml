@@ -5,7 +5,9 @@ name: build
 # workflow directly).
 # - No push trigger on purpose: branch pushes must never consume runners.
 # - Manual verification goes through workflow_dispatch, releases through v* tags.
-# - Android lane is enabled (arm64 apk, release-signed from the KEYSTORE secret);
+# - Android lane is enabled and ships the Lite variant only, arm64-v8a only
+#   (release-signed from the KEYSTORE secret). No fat/universal apk, no other
+#   ABIs: build exactly one apk to keep the release lane cheap and clear.
 #   macOS entries removed, SignPath stays off.
 on:
   workflow_dispatch:
@@ -27,16 +29,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Android: one lane only (arm64-v8a covers virtually every phone).
-          # To ship a fat apk as well, uncomment the universal entry; the same
-          # steps handle it (setup.dart builds android-arm,android-arm64,
-          # android-x64 into one apk, product name android-universal.apk).
+          # --- Android: lite flavor, arm64-v8a only (covers virtually every phone).
+          # `lite: true` => setup.dart gets --lite (drops easytier, tailscale,
+          # zerotier, fake-tcp and gVisor) and the apk is named
+          # Bettbox-<ver>-android-lite-arm64-v8a.apk.
+          # No universal entry on purpose: the release lane only ships lite arm64.
           - platform: android
             os: ubuntu-24.04
             arch: arm64
-          # - platform: android
-          #   os: ubuntu-24.04
-          #   arch: universal
+            lite: true
           # --- Desktops ---
           - platform: windows
             os: windows-2022
@@ -322,7 +323,7 @@ jobs:
         if: matrix.platform == 'android'
         uses: actions/upload-artifact@v7
         with:
-          name: Bettbox-android-${{ matrix.arch }}${{ matrix.lite == true && '-lite' || '' }}
+          name: Bettbox-android${{ matrix.lite == true && '-lite' || '' }}-${{ matrix.arch }}-v8a
           path: ./dist/*.apk
           archive: false
           overwrite: true

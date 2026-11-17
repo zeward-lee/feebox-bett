@@ -58,6 +58,14 @@ type AnyTLSOption struct {
 	// leaving it empty keeps the node a plain anytls-over-TLS outbound.
 	Transport string                `proxy:"transport,omitempty"`
 	XHTTPOpts XHTTPTransportOptions `proxy:"xhttp-opts,omitempty"`
+	// PasswordMode explicitly selects the first-packet credential scheme. Empty
+	// means standard anytls (sha256 of password) for every node; "raw16" enables
+	// the vendor bare-32-hex time-token derivation
+	// (see anytls.PasswordModeRaw16). The Shanlian generator writes this on
+	// every Shanlian node. It is deliberately not inferred from the password
+	// shape: an ordinary anytls node whose password happens to be 32 hex
+	// characters must keep the standard wire.
+	PasswordMode string `proxy:"password-mode,omitempty"`
 }
 
 func (t *AnyTLS) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -123,6 +131,22 @@ func EnsureShanlianPasswordMarker(password string) string {
 	return password + anytls.ShanlianPasswordMarker
 }
 
+// ShanlianPasswordMode is the `password-mode` value that selects the Shanlian
+// vendor first-packet credential, re-exported so the parser can apply it to
+// `type: shanlian` nodes without importing the transport package directly.
+const ShanlianPasswordMode = anytls.PasswordModeRaw16
+
+// ApplyShanlianTypeDefaults fills the credential fields implied by the vendor
+// `type: shanlian` spelling: the direct-key "#sl" password form and the vendor
+// bare-32-hex credential scheme. An explicit `password-mode:` in the node always
+// wins, so a hand-written node can still override the scheme.
+func (o *AnyTLSOption) ApplyShanlianTypeDefaults() {
+	o.Password = EnsureShanlianPasswordMarker(o.Password)
+	if o.PasswordMode == "" {
+		o.PasswordMode = ShanlianPasswordMode
+	}
+}
+
 func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
 	outbound := &AnyTLS{
@@ -181,6 +205,7 @@ func NewAnyTLS(option AnyTLSOption) (*AnyTLS, error) {
 		MinIdleSession:           option.MinIdleSession,
 		DisableReuse:             option.DisableReuse,
 		SkipTLS:                  skipAnyTLSTLS,
+		PasswordMode:             option.PasswordMode,
 	}
 	echConfig, err := option.ECHOpts.Parse()
 	if err != nil {

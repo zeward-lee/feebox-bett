@@ -2,11 +2,15 @@ package anytls
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
+	"strings"
 	"testing"
 	"time"
+
+	M "github.com/metacubex/sing/common/metadata"
 )
 
 // officialCapturedCredential is a credential the live Shanlian endpoint
@@ -122,7 +126,71 @@ func TestDecodeHexPasswordKeyFormSelection(t *testing.T) {
 // without "#sl" stays an ordinary anytls password (sha256 of the literal).
 func TestFirstPacketLongHexWithoutMarkerKeepsUpstreamPrefix(t *testing.T) {
 	want := sha256.Sum256([]byte(shanlianFixture))
-	assertUpstreamFirstPacket(t, shanlianFixture, want[:])
+	assertUpstreamFirstPacket(t, shanlianFixture, "", want[:])
+}
+
+// TestFirstPacketLongHexWithRaw16ModeKeepsUpstreamPrefix documents that
+// `password-mode: raw16` is a no-op for a password that is not the bare 32 hex
+// form (the generator writes the marker on every Shanlian node, including the
+// "#sl" direct-key ones): the credential stays sha256 of the literal.
+func TestFirstPacketLongHexWithRaw16ModeKeepsUpstreamPrefix(t *testing.T) {
+	want := sha256.Sum256([]byte(shanlianFixture))
+	assertUpstreamFirstPacket(t, shanlianFixture, PasswordModeRaw16, want[:])
+}
+
+// TestFirstPacketOrdinaryPasswordWithRaw16ModeKeepsUpstreamPrefix pins the rest of
+// the no-op surface: an ordinary password on a node that carries the marker
+// still authenticates with sha256(password).
+func TestFirstPacketOrdinaryPasswordWithRaw16ModeKeepsUpstreamPrefix(t *testing.T) {
+	const password = "ordinary-password"
+	want := sha256.Sum256([]byte(password))
+	assertUpstreamFirstPacket(t, password, PasswordModeRaw16, want[:])
+}
+
+// TestNormalizePasswordMode pins the explicit scheme selector: empty and the vendor
+// value (case/space insensitive) are the only accepted forms; anything else
+// fails closed instead of silently degrading to standard anytls.
+func TestNormalizePasswordMode(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{PasswordModeRaw16, PasswordModeRaw16, false},
+		{"  RAW16  ", PasswordModeRaw16, false},
+		{"shanlian-hex", "", true},
+		{"shanlian", "", true},
+		{"sha256", "", true},
+	} {
+		got, err := normalizePasswordMode(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("normalizePasswordMode(%q) = %q, want an error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("normalizePasswordMode(%q) error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizePasswordMode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNewClientRejectsUnsupportedPasswordMode proves the failure happens at construction
+// time (config load) rather than on every dial.
+func TestNewClientRejectsUnsupportedPasswordMode(t *testing.T) {
+	_, err := NewClient(context.Background(), ClientConfig{
+		Password:     vendorHexPassword,
+		Server:       M.ParseSocksaddrHostPort("127.0.0.1", 1),
+		Dialer:       directDialer{},
+		PasswordMode: "shanlian-hex",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported password-mode") {
+		t.Fatalf("NewClient(password-mode=shanlian-hex) error = %v, want unsupported password-mode", err)
+	}
 }
 
 // TestFirstPacketHexPasswordIsRecomputedPerConnection proves that the token is
@@ -141,7 +209,7 @@ func TestFirstPacketHexPasswordIsRecomputedPerConnection(t *testing.T) {
 	}
 	defer listener.Close()
 
-	client := newTestClient(t, vendorHexPassword, listener, serverName)
+	client := newTestClient(t, vendorHexPassword, PasswordModeRaw16, listener, serverName)
 	defer client.Close()
 
 	first, firstRecords := captureFirstPacketConn(t, client, listener, serverTLS)

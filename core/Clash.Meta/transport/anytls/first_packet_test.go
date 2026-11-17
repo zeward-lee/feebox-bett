@@ -48,9 +48,10 @@ const firstPacketPlaintextLen = sha256.Size + 2 + defaultFirstPacketPadding
 const firstPacketRecordLen = firstPacketPlaintextLen + 17
 
 // TestFirstPacketVendorHexPasswordUsesDerivedCredential pins the vendor bare 32
-// hex password form to the vendor credential derivation: the first 16 bytes are
-// the decoded key (not sha256(password)) and the last 16 bytes are the time
-// token XORed with that key, followed by the unchanged upstream padding suffix.
+// hex password form, explicitly marked `password-mode: raw16`, to the vendor
+// credential derivation: the first 16 bytes are the decoded key (not
+// sha256(password)) and the last 16 bytes are the time token XORed with that
+// key, followed by the unchanged upstream padding suffix.
 // The official client sends exactly this shape (capture-official-20261117, 5/5
 // records were 23(81)).
 func TestFirstPacketVendorHexPasswordUsesDerivedCredential(t *testing.T) {
@@ -58,22 +59,34 @@ func TestFirstPacketVendorHexPasswordUsesDerivedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode vendor password: %v", err)
 	}
-	plaintext, appRecordLens := captureFirstPacket(t, vendorHexPassword)
+	plaintext, appRecordLens := captureFirstPacket(t, vendorHexPassword, PasswordModeRaw16)
 	assertFirstPacketLayout(t, plaintext, appRecordLens)
 
 	u := assertDerivedHexCredential(t, plaintext[:sha256.Size], raw)
 	assertTimestampMillis(t, u)
 }
 
+// TestFirstPacketHexPasswordWithoutAuthUsesSHA256 is the regression lock for the
+// confirmed P1: a 32 hex character password is *not* enough to select the vendor
+// scheme. Without `password-mode: raw16` the node is an ordinary anytls node and
+// the first packet must carry sha256(password), byte for byte as before the
+// vendor derivation existed.
+func TestFirstPacketHexPasswordWithoutAuthUsesSHA256(t *testing.T) {
+	want := sha256.Sum256([]byte(vendorHexPassword))
+	assertUpstreamFirstPacket(t, vendorHexPassword, "", want[:])
+}
+
 // TestFirstPacketMarkerKeepsUpstreamPrefix pins the "#sl" variant: the 64 hex
 // key is decoded and keeps the same 64 byte upstream layout, so the existing
-// vendor marker path is unchanged.
+// vendor marker path is unchanged. The generator also emits
+// `password-mode: raw16` on these nodes, and that marker must stay a no-op (the
+// derived form only applies to the bare 32 hex password).
 func TestFirstPacketMarkerKeepsUpstreamPrefix(t *testing.T) {
 	want, err := hex.DecodeString(shanlianFixture)
 	if err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	assertUpstreamFirstPacket(t, shanlianFixture+"#sl", want)
+	assertUpstreamFirstPacket(t, shanlianFixture+"#sl", PasswordModeRaw16, want)
 }
 
 // TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix pins that a standard
@@ -82,7 +95,7 @@ func TestFirstPacketMarkerKeepsUpstreamPrefix(t *testing.T) {
 func TestFirstPacketOrdinaryPasswordKeepsUpstreamPrefix(t *testing.T) {
 	const password = "ordinary-password"
 	want := sha256.Sum256([]byte(password))
-	assertUpstreamFirstPacket(t, password, want[:])
+	assertUpstreamFirstPacket(t, password, "", want[:])
 }
 
 // TestSkipTLSWritesHandshakeIntoPlainStream pins the vendor xhttp path: with
@@ -118,6 +131,7 @@ func TestSkipTLSWritesHandshakeIntoPlainStream(t *testing.T) {
 		Server:                   M.ParseSocksaddrHostPort(host, port),
 		Dialer:                   directDialer{},
 		SkipTLS:                  true,
+		PasswordMode:             PasswordModeRaw16,
 		IdleSessionCheckInterval: 30 * time.Second,
 		IdleSessionTimeout:       30 * time.Second,
 	})
@@ -184,12 +198,12 @@ func TestSkipTLSWritesHandshakeIntoPlainStream(t *testing.T) {
 
 // assertUpstreamFirstPacket captures the real first packet for password and
 // asserts both the plaintext layout and the TLS record payload length.
-func assertUpstreamFirstPacket(t *testing.T, password string, wantCredential []byte) {
+func assertUpstreamFirstPacket(t *testing.T, password, mode string, wantCredential []byte) {
 	t.Helper()
 	if len(wantCredential) != sha256.Size {
 		t.Fatalf("credential fixture is %d bytes, want %d", len(wantCredential), sha256.Size)
 	}
-	plaintext, appRecordLens := captureFirstPacket(t, password)
+	plaintext, appRecordLens := captureFirstPacket(t, password, mode)
 	assertFirstPacketLayout(t, plaintext, appRecordLens)
 
 	if !bytes.Equal(plaintext[:sha256.Size], wantCredential) {
@@ -265,7 +279,7 @@ func assertTimestampMillis(t *testing.T, millis int64) {
 // with a SHA-384 suite as in the capture, 53 with SHA-256 as negotiated against
 // the test server), so the first packet is the last record captured here: the
 // only thing this path writes after the handshake.
-func captureFirstPacket(t *testing.T, password string) (plaintext []byte, appRecordLens []int) {
+func captureFirstPacket(t *testing.T, password, mode string) (plaintext []byte, appRecordLens []int) {
 	t.Helper()
 	serverTLS, serverName := testServerTLSConfig(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -274,14 +288,14 @@ func captureFirstPacket(t *testing.T, password string) (plaintext []byte, appRec
 	}
 	defer listener.Close()
 
-	client := newTestClient(t, password, listener, serverName)
+	client := newTestClient(t, password, mode, listener, serverName)
 	defer client.Close()
 
 	return captureFirstPacketConn(t, client, listener, serverTLS)
 }
 
 // newTestClient builds an anytls client pointed at listener's loopback address.
-func newTestClient(t *testing.T, password string, listener net.Listener, serverName string) *Client {
+func newTestClient(t *testing.T, password, mode string, listener net.Listener, serverName string) *Client {
 	t.Helper()
 	host, portText, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
@@ -297,6 +311,7 @@ func newTestClient(t *testing.T, password string, listener net.Listener, serverN
 		Server:                   M.ParseSocksaddrHostPort(host, port),
 		Dialer:                   directDialer{},
 		TLSConfig:                clientTLSConfig(serverName),
+		PasswordMode:             mode,
 		IdleSessionCheckInterval: 30 * time.Second,
 		IdleSessionTimeout:       30 * time.Second,
 	})

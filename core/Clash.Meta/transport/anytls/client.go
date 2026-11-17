@@ -45,12 +45,35 @@ type ClientConfig struct {
 	// deadline exceeded" failure the dedicated lines showed. Plain anytls nodes
 	// keep TLSConfig and this flag false.
 	SkipTLS bool
+	// PasswordMode explicitly selects the first-packet credential scheme. Empty
+	// keeps the standard anytls behavior (sha256 of Password) for every node.
+	// Set it to PasswordModeRaw16 to opt into the vendor's bare-32-hex
+	// time-token derivation.
+	//
+	// This is an explicit per-node opt-in on purpose: a 32 hex character
+	// password is indistinguishable from an ordinary anytls password, so
+	// inferring the vendor scheme from the password alone silently changed the
+	// wire (the server then rejects the node with no local error). The Shanlian
+	// generator writes `password-mode: raw16` on every Shanlian node instead.
+	// When set on a node whose password is not the bare 32 hex form the marker
+	// is a no-op (the "#sl" direct-key form and ordinary passwords keep
+	// passwordSha256).
+	PasswordMode string
 }
+
+// PasswordModeRaw16 is the `password-mode` value that selects the Shanlian
+// vendor first-packet credential: the password must be the bare 32 hex form, and
+// the credential is `raw16 || (BE64(u*10+1) || BE64(u)) XOR raw16` where raw16 is
+// the decoded key and u is the connection's Unix time in milliseconds (see
+// deriveHexPasswordCredential). "raw16" names the first half of the credential:
+// the raw 16 byte key instead of sha256(password).
+const PasswordModeRaw16 = "raw16"
 
 type Client struct {
 	passwordSha256 []byte
-	// hexPasswordKey is set only when Password is the vendor bare 32 hex form:
-	// the key decoded from it is combined with a per-connection time token (see
+	// hexPasswordKey is set only when PasswordMode is PasswordModeRaw16 *and*
+	// Password is the vendor bare 32 hex form: the key decoded from it is
+	// combined with a per-connection time token (see
 	// deriveHexPasswordCredential) instead of sending passwordSha256.
 	hexPasswordKey []byte
 	tlsConfig      *vmess.TLSConfig
@@ -73,10 +96,28 @@ const (
 // i.e. the hexadecimal encoding of the 16 byte shared key.
 var hexPasswordPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 
+// normalizePasswordMode validates the explicit credential scheme selector. An
+// empty value is the standard anytls path; only PasswordModeRaw16 turns on the
+// vendor derivation. Unknown values fail closed instead of silently falling
+// back, so a typo cannot masquerade as "standard anytls".
+func normalizePasswordMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "":
+		return "", nil
+	case PasswordModeRaw16:
+		return PasswordModeRaw16, nil
+	default:
+		return "", fmt.Errorf("anytls: unsupported password-mode %q (want %q)", mode, PasswordModeRaw16)
+	}
+}
+
 // decodeHexPasswordKey returns the 16 byte shared key encoded by password when
 // it is exactly 32 hex characters. ok is false for every other form (the "#sl"
 // marker variant, ordinary anytls passwords, wrong lengths, invalid hex), which
 // keep their existing decoding untouched.
+//
+// It only decodes the form; whether the derived credential is used is decided
+// by ClientConfig.PasswordMode (see NewClient), never by the password shape alone.
 func decodeHexPasswordKey(password string) (key []byte, ok bool) {
 	if !hexPasswordPattern.MatchString(password) {
 		return nil, false
@@ -142,6 +183,10 @@ func decodeClientPassword(password string) ([]byte, error) {
 }
 
 func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
+	mode, err := normalizePasswordMode(config.PasswordMode)
+	if err != nil {
+		return nil, err
+	}
 	password, err := decodeClientPassword(config.Password)
 	if err != nil {
 		return nil, err
@@ -153,8 +198,14 @@ func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 		dialer:         config.Dialer,
 		server:         config.Server,
 	}
-	if key, ok := decodeHexPasswordKey(config.Password); ok {
-		c.hexPasswordKey = key
+	// Only an explicit `password-mode: raw16` switches to the vendor time-token
+	// credential. A bare 32 hex password without the marker is an ordinary
+	// anytls password and keeps sha256(password), which is what standard anytls
+	// servers expect.
+	if mode == PasswordModeRaw16 {
+		if key, ok := decodeHexPasswordKey(config.Password); ok {
+			c.hexPasswordKey = key
+		}
 	}
 	// Initialize the padding state of this client
 	padding.UpdatePaddingScheme(padding.DefaultPaddingScheme, &c.padding)
@@ -217,9 +268,10 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 // that exact shape for the bare 32 hex character password as well, so this
 // vendor form must not skip the padding suffix.
 //
-// The 32 byte credential itself is passwordSha256 for ordinary passwords, but
-// the vendor bare 32 hex form sends a time based credential derived on every
-// new connection (see hexPasswordCredential).
+// The 32 byte credential itself is passwordSha256 for ordinary passwords, and
+// for a node explicitly marked `password-mode: raw16` whose password is the bare
+// 32 hex form it is a time based credential derived on every new connection
+// (see hexPasswordCredential).
 func (c *Client) writeFirstPacket(w io.Writer) (int64, error) {
 	b := buf.NewPacket()
 	defer b.Release()
@@ -246,8 +298,9 @@ func (c *Client) writeFirstPacket(w io.Writer) (int64, error) {
 // server just like the official client's token frozen at client creation, since
 // the server only rejects tokens too far in the future.
 //
-// It returns nil when the password is not the vendor bare hex form or the key is
-// malformed, in which case writeFirstPacket keeps the upstream behavior.
+// It returns nil when PasswordMode is not PasswordModeRaw16, the password is not
+// vendor bare hex form or the key is malformed; in which case writeFirstPacket
+// keeps the upstream behavior.
 func (c *Client) hexPasswordCredential() []byte {
 	if len(c.hexPasswordKey) != hexPasswordKeySize {
 		return nil

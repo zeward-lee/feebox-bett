@@ -288,13 +288,17 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		// `type: shanlian` is the vendor's own name for the anytls wire with the
 		// Shanlian direct-authentication password. The "#sl" marker may be
 		// omitted because the type implies it; the plain `anytls` case above
-		// keeps accepting the old `password: ...#SL` spelling.
+		// keeps accepting the old `password: ...#SL` spelling. The type also
+		// selects the vendor bare-32-hex credential scheme, so a shanlian node
+		// published with a 32 hex password keeps working after the credential
+		// derivation became an explicit opt-in. A bare `type: anytls` node is
+		// only switched when it carries `password-mode: raw16` itself.
 		anytlsOption := &outbound.AnyTLSOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, anytlsOption)
 		if err != nil {
 			break
 		}
-		anytlsOption.Password = outbound.EnsureShanlianPasswordMarker(anytlsOption.Password)
+		anytlsOption.ApplyShanlianTypeDefaults()
 		var shanlianAdapter *outbound.AnyTLS
 		shanlianAdapter, err = outbound.NewAnyTLS(*anytlsOption)
 		if err != nil {

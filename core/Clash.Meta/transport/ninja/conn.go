@@ -35,11 +35,37 @@ import (
 const (
 	metaLen        = 12
 	chunkHeaderLen = 4
-	// maxChunkPayload keeps the sealed chunk small enough for a single flush.
+	// maxChunkPayload keeps the sealed chunk small enough for a single flush
+	// and matches the reference writer split (0x3fff).
 	maxChunkPayload = 0x3fff
-	// maxFirstBlock caps the in-band first block payload.
-	maxFirstBlock = 0xffff - 64
+
+	// firstBlockBudget is the reference core planFirstBlock constant (0x36d):
+	// address || BE16(pad) || pad || first payload fill this many bytes at most.
+	firstBlockBudget = 877
+	// paddingRandMax is the reference random padding ceiling (0x384): every
+	// data chunk carries rand.Intn(900)+1 = 1..900 padding bytes.
+	paddingRandMax = 900
 )
+
+// planFirstBlock mirrors the reference core.planFirstBlock: given the socks
+// address length it returns the padding bytes that go in front of the first
+// payload plus the payload budget left over. Address, padding and payload
+// together fill firstBlockBudget bytes, so the first block stays ~879 bytes
+// on the wire (addrLen + 2 + pad + payload) instead of the former 64 KiB.
+//
+// The reference clamps the draw to 900 and, when the budget is already
+// exhausted, still emits a one byte pad and no payload at all.
+func planFirstBlock(addrLen int) (pad, payload int) {
+	limit := firstBlockBudget - addrLen
+	if limit > paddingRandMax {
+		limit = paddingRandMax
+	}
+	if limit <= 0 {
+		return 1, 0
+	}
+	pad = mrand.Intn(limit) + 1
+	return pad, firstBlockBudget - addrLen - pad
+}
 
 // PaddingMode mirrors the reference padding strategies.
 type PaddingMode string
@@ -99,19 +125,22 @@ type Config struct {
 	// NodePassword only feeds the token wrapping key; the AEAD sub key comes
 	// from Password. When empty it falls back to Password.
 	NodePassword string
-	Padding      PaddingConfig
+	// Padding only sizes the responder header record. Initiator-side first
+	// block and chunk padding follow the reference core's fixed model
+	// (planFirstBlock / rand.Intn(900)+1) and ignore this setting.
+	Padding PaddingConfig
 }
 
 // state holds the derived key material of one direction of one connection.
 type state struct {
-	cfg    *Config
-	psk    []byte
+	cfg      *Config
+	psk      []byte
 	tokenPSK []byte
-	salt   []byte
-	aead   cipher.AEAD
-	nonce  []byte
-	role   byte
-	banner []byte // token we send (initiator) / expect (responder)
+	salt     []byte
+	aead     cipher.AEAD
+	nonce    []byte
+	role     byte
+	banner   []byte // token we send (initiator) / expect (responder)
 }
 
 func newState(cfg *Config, role byte) (*state, error) {
@@ -286,12 +315,12 @@ func (c *Conn) writeResponderHeader(payload []byte) (int, error) {
 }
 
 // writeHeader emits salt || token || sealed(meta) || sealed(firstBlock).
-// dstAddr is the socks5 encoded destination; pass nil when responding.
-func (c *Conn) writeHeader(dstAddr []byte, firstPayload []byte) error {
+// dstAddr is the socks5 encoded destination; pass nil when responding. pad is
+// the planned padding length (see planFirstBlock), not recomputed here.
+func (c *Conn) writeHeader(dstAddr []byte, pad int, firstPayload []byte) error {
 	if err := c.st.init(); err != nil {
 		return err
 	}
-	pad := c.cfg.Padding.PaddingLen(len(firstPayload) + len(dstAddr) + 2)
 	if pad < 0 {
 		pad = 0
 	}
@@ -346,11 +375,12 @@ func (c *Conn) Write(b []byte) (int, error) {
 			c.wroteHeader = true
 			return n, err
 		}
+		pad, budget := planFirstBlock(len(c.addr))
 		firstLen := len(b)
-		if firstLen > maxFirstBlock {
-			firstLen = maxFirstBlock
+		if firstLen > budget {
+			firstLen = budget
 		}
-		if err := c.writeHeader(c.addr, b[:firstLen]); err != nil {
+		if err := c.writeHeader(c.addr, pad, b[:firstLen]); err != nil {
 			return 0, err
 		}
 		written := firstLen
@@ -380,10 +410,9 @@ func (c *Conn) writeChunk(b []byte) (int, error) {
 }
 
 func (c *Conn) writeOneChunk(payload []byte) error {
-	pad := c.cfg.Padding.PaddingLen(len(payload))
-	if pad < 0 {
-		pad = 0
-	}
+	// The reference core pads every data chunk with rand.Intn(900)+1 bytes,
+	// independent of the node's pass-layer padding options.
+	pad := mrand.Intn(paddingRandMax) + 1
 	if pad > 0xffff {
 		pad = 0xffff
 	}

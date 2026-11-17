@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,11 +37,68 @@ type ClientConfig struct {
 
 type Client struct {
 	passwordSha256 []byte
+	// hexPasswordKey is set only when Password is the vendor bare 32 hex form:
+	// the key decoded from it is combined with a per-connection time token (see
+	// deriveHexPasswordCredential) instead of sending passwordSha256.
+	hexPasswordKey []byte
 	tlsConfig      *vmess.TLSConfig
 	dialer         N.Dialer
 	server         M.Socksaddr
 	sessionClient  *session.Client
 	padding        atomic.Pointer[padding.PaddingFactory]
+}
+
+const (
+	// hexPasswordKeySize is the decoded size of the vendor bare hex password.
+	hexPasswordKeySize = 16
+	// hexPasswordCredentialSize is the first packet credential size: the 16 byte
+	// key followed by the 16 byte time token XORed with that key.
+	hexPasswordCredentialSize = 32
+)
+
+// hexPasswordPattern matches the vendor bare password form: 32 hex characters,
+// i.e. the hexadecimal encoding of the 16 byte shared key.
+var hexPasswordPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+
+// decodeHexPasswordKey returns the 16 byte shared key encoded by password when
+// it is exactly 32 hex characters. ok is false for every other form (the "#sl"
+// marker variant, ordinary anytls passwords, wrong lengths, invalid hex), which
+// keep their existing decoding untouched.
+func decodeHexPasswordKey(password string) (key []byte, ok bool) {
+	if !hexPasswordPattern.MatchString(password) {
+		return nil, false
+	}
+	decoded, err := hex.DecodeString(password)
+	if err != nil || len(decoded) != hexPasswordKeySize {
+		return nil, false
+	}
+	return decoded, true
+}
+
+// deriveHexPasswordCredential reproduces the vendor client's 32 byte first
+// packet credential (applyAnyTLSHexPassword in the official fork):
+//
+//	cred = raw16 || (T16 XOR raw16)
+//	T16  = BE64(u*10+1) || BE64(u)
+//
+// raw16 is the decoded 16 byte key and u is Unix time in milliseconds. It
+// returns nil for a malformed key so callers fall back to passwordSha256
+// instead of panicking.
+func deriveHexPasswordCredential(raw []byte, u int64) []byte {
+	if len(raw) != hexPasswordKeySize {
+		return nil
+	}
+	millis := uint64(u)
+	var token [hexPasswordKeySize]byte
+	binary.BigEndian.PutUint64(token[0:8], millis*10+1)
+	binary.BigEndian.PutUint64(token[8:16], millis)
+
+	credential := make([]byte, hexPasswordCredentialSize)
+	copy(credential, raw)
+	for i := range token {
+		credential[hexPasswordKeySize+i] = token[i] ^ raw[i]
+	}
+	return credential
 }
 
 // ShanlianPasswordMarker is the suffix the vendor client puts on a Shanlian
@@ -80,6 +138,9 @@ func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 		tlsConfig:      config.TLSConfig,
 		dialer:         config.Dialer,
 		server:         config.Server,
+	}
+	if key, ok := decodeHexPasswordKey(config.Password); ok {
+		c.hexPasswordKey = key
 	}
 	// Initialize the padding state of this client
 	padding.UpdatePaddingScheme(padding.DefaultPaddingScheme, &c.padding)
@@ -122,7 +183,7 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 // writeFirstPacket writes the anytls handshake prefix that precedes the first
 // frame (the session client sends the settings frame right after this returns).
 //
-// The prefix is `[32B sha256(password)][2B big endian padding length][padding]`,
+// The prefix is `[32B credential][2B big endian padding length][padding]`,
 // i.e. the upstream sing-anytls v0.0.11 layout. The vendor client embeds
 // sing-anytls v0.0.11 with the default padding scheme `0=30-30`, so its first
 // packet is always 64 bytes plaintext (32 + 2 + 30) and the matching TLS record
@@ -130,11 +191,19 @@ func (c *Client) createOutboundTLSConnection(ctx context.Context) (net.Conn, err
 // The official capture (capture-official-20261117, 5/5 connections) confirms
 // that exact shape for the bare 32 hex character password as well, so this
 // vendor form must not skip the padding suffix.
+//
+// The 32 byte credential itself is passwordSha256 for ordinary passwords, but
+// the vendor bare 32 hex form sends a time based credential derived on every
+// new connection (see hexPasswordCredential).
 func (c *Client) writeFirstPacket(w io.Writer) (int64, error) {
 	b := buf.NewPacket()
 	defer b.Release()
 
-	b.Write(c.passwordSha256)
+	credential := c.hexPasswordCredential()
+	if credential == nil {
+		credential = c.passwordSha256
+	}
+	b.Write(credential)
 	var paddingLen int
 	if pad := c.padding.Load().GenerateRecordPayloadSizes(0); len(pad) > 0 {
 		paddingLen = pad[0]
@@ -144,6 +213,21 @@ func (c *Client) writeFirstPacket(w io.Writer) (int64, error) {
 		b.WriteZeroN(paddingLen)
 	}
 	return b.WriteTo(w)
+}
+
+// hexPasswordCredential derives the credential for a connection that is being
+// established now. The vendor token embeds the wall clock, so it is recomputed
+// per connection instead of being cached on the client; that is accepted by the
+// server just like the official client's token frozen at client creation, since
+// the server only rejects tokens too far in the future.
+//
+// It returns nil when the password is not the vendor bare hex form or the key is
+// malformed, in which case writeFirstPacket keeps the upstream behavior.
+func (c *Client) hexPasswordCredential() []byte {
+	if len(c.hexPasswordKey) != hexPasswordKeySize {
+		return nil
+	}
+	return deriveHexPasswordCredential(c.hexPasswordKey, time.Now().UnixMilli())
 }
 
 func (h *Client) Close() error {

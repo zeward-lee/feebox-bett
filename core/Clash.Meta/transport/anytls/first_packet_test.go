@@ -28,7 +28,9 @@ import (
 )
 
 // vendorHexPassword is the vendor's bare 32 hex character password form, the
-// one the Shanlian subscription publishes without the "#sl" marker.
+// one the Shanlian subscription publishes without the "#sl" marker. It is not a
+// literal secret: it hex-decodes to the 16 byte key used by the vendor
+// credential derivation (see deriveHexPasswordCredential).
 const vendorHexPassword = "720a437f4beb4fb9915f7f913d7bc9f7"
 
 // defaultFirstPacketPadding is the padding length of the vendor default scheme
@@ -45,15 +47,22 @@ const firstPacketPlaintextLen = sha256.Size + 2 + defaultFirstPacketPadding
 // the 1-byte inner content type and the 16-byte AEAD tag.
 const firstPacketRecordLen = firstPacketPlaintextLen + 17
 
-// TestFirstPacketVendorHexPasswordMatchesOfficialCapture pins the vendor bare
-// 32 hex password form to the upstream sing-anytls v0.0.11 first packet: a 64
-// byte plaintext `[32B sha256(password)][0x001e][30 * 0x00]`, which on the wire
-// is an application_data record with payload length 81. The official client
-// sends exactly this for every connection observed in capture-official-20261117
-// (5/5 records were 23(81)).
-func TestFirstPacketVendorHexPasswordMatchesOfficialCapture(t *testing.T) {
-	want := sha256.Sum256([]byte(vendorHexPassword))
-	assertUpstreamFirstPacket(t, vendorHexPassword, want[:])
+// TestFirstPacketVendorHexPasswordUsesDerivedCredential pins the vendor bare 32
+// hex password form to the vendor credential derivation: the first 16 bytes are
+// the decoded key (not sha256(password)) and the last 16 bytes are the time
+// token XORed with that key, followed by the unchanged upstream padding suffix.
+// The official client sends exactly this shape (capture-official-20261117, 5/5
+// records were 23(81)).
+func TestFirstPacketVendorHexPasswordUsesDerivedCredential(t *testing.T) {
+	raw, err := hex.DecodeString(vendorHexPassword)
+	if err != nil {
+		t.Fatalf("decode vendor password: %v", err)
+	}
+	plaintext, appRecordLens := captureFirstPacket(t, vendorHexPassword)
+	assertFirstPacketLayout(t, plaintext, appRecordLens)
+
+	u := assertDerivedHexCredential(t, plaintext[:sha256.Size], raw)
+	assertTimestampMillis(t, u)
 }
 
 // TestFirstPacketMarkerKeepsUpstreamPrefix pins the "#sl" variant: the 64 hex
@@ -84,13 +93,21 @@ func assertUpstreamFirstPacket(t *testing.T, password string, wantCredential []b
 		t.Fatalf("credential fixture is %d bytes, want %d", len(wantCredential), sha256.Size)
 	}
 	plaintext, appRecordLens := captureFirstPacket(t, password)
+	assertFirstPacketLayout(t, plaintext, appRecordLens)
 
+	if !bytes.Equal(plaintext[:sha256.Size], wantCredential) {
+		t.Fatalf("credential = %x, want %x", plaintext[:sha256.Size], wantCredential)
+	}
+}
+
+// assertFirstPacketLayout checks the vendor 64 byte plaintext: 32 bytes of
+// credential, the 2 byte big endian padding length 30 and 30 zero padding
+// bytes, carried in a TLS application_data record with payload length 81.
+func assertFirstPacketLayout(t *testing.T, plaintext []byte, appRecordLens []int) {
+	t.Helper()
 	if len(plaintext) != firstPacketPlaintextLen {
 		t.Fatalf("first packet plaintext = %d bytes (%x), want %d bytes",
 			len(plaintext), plaintext, firstPacketPlaintextLen)
-	}
-	if !bytes.Equal(plaintext[:sha256.Size], wantCredential) {
-		t.Fatalf("credential = %x, want %x", plaintext[:sha256.Size], wantCredential)
 	}
 	if got := binary.BigEndian.Uint16(plaintext[sha256.Size : sha256.Size+2]); int(got) != defaultFirstPacketPadding {
 		t.Fatalf("padding length = %d, want %d", got, defaultFirstPacketPadding)
@@ -103,6 +120,43 @@ func assertUpstreamFirstPacket(t *testing.T, password string, wantCredential []b
 	if got := appRecordLens[len(appRecordLens)-1]; got != firstPacketRecordLen {
 		t.Fatalf("first packet application_data record length = %d (all records %v), want %d",
 			got, appRecordLens, firstPacketRecordLen)
+	}
+}
+
+// assertDerivedHexCredential verifies that credential is `raw16 || (T16 XOR
+// raw16)` for some time token T16 = BE64(u*10+1) || BE64(u), and returns u.
+func assertDerivedHexCredential(t *testing.T, credential, raw []byte) int64 {
+	t.Helper()
+	if len(credential) != hexPasswordCredentialSize {
+		t.Fatalf("credential is %d bytes, want %d", len(credential), hexPasswordCredentialSize)
+	}
+	if len(raw) != hexPasswordKeySize {
+		t.Fatalf("key fixture is %d bytes, want %d", len(raw), hexPasswordKeySize)
+	}
+	if !bytes.Equal(credential[:hexPasswordKeySize], raw) {
+		t.Fatalf("credential key half = %x, want the decoded key %x", credential[:hexPasswordKeySize], raw)
+	}
+	var token [hexPasswordKeySize]byte
+	for i := range token {
+		token[i] = credential[hexPasswordKeySize+i] ^ raw[i]
+	}
+	high := binary.BigEndian.Uint64(token[0:8])
+	low := binary.BigEndian.Uint64(token[8:16])
+	if high != low*10+1 {
+		t.Fatalf("time token = %x: high=%d is not UnixMilli*10+1 for low=%d", token, high, low)
+	}
+	return int64(low)
+}
+
+// assertTimestampMillis pins the derived token to roughly the wall clock, which
+// proves the credential is generated at connection time instead of being a
+// fixed fixture or a cached value.
+func assertTimestampMillis(t *testing.T, millis int64) {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	const slack = int64(60 * 1000)
+	if millis < now-slack || millis > now+slack {
+		t.Fatalf("credential timestamp = %d ms, wall clock = %d ms (diff %d ms)", millis, now, millis-now)
 	}
 }
 
@@ -123,6 +177,15 @@ func captureFirstPacket(t *testing.T, password string) (plaintext []byte, appRec
 	}
 	defer listener.Close()
 
+	client := newTestClient(t, password, listener, serverName)
+	defer client.Close()
+
+	return captureFirstPacketConn(t, client, listener, serverTLS)
+}
+
+// newTestClient builds an anytls client pointed at listener's loopback address.
+func newTestClient(t *testing.T, password string, listener net.Listener, serverName string) *Client {
+	t.Helper()
 	host, portText, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		t.Fatalf("split: %v", err)
@@ -143,8 +206,14 @@ func captureFirstPacket(t *testing.T, password string) (plaintext []byte, appRec
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer client.Close()
+	return client
+}
 
+// captureFirstPacketConn opens one connection through client, accepts it on
+// listener and returns the plaintext the server received plus the payload
+// length of every application_data record on the wire.
+func captureFirstPacketConn(t *testing.T, client *Client, listener net.Listener, serverTLS *tls.Config) (plaintext []byte, appRecordLens []int) {
+	t.Helper()
 	connReady := make(chan net.Conn, 1)
 	dialErr := make(chan error, 1)
 	go func() {

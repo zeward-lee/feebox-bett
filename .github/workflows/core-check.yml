@@ -1,0 +1,63 @@
+name: Core Check
+
+# Manual-only: no push/tag trigger, so this never burns runner minutes on its own.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-check:
+    name: Kernel build + protocol tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Golang
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            core/go.sum
+            core/Clash.Meta/go.sum
+
+      - name: Core protocol tests (Clash.Meta)
+        working-directory: core/Clash.Meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          go env -w GOFLAGS=-mod=mod
+          go build ./...
+
+          # Requested targets. A target whose directory is absent is skipped
+          # with a notice (e.g. component/smart until it lands), so the job
+          # still validates everything that does exist.
+          TARGETS="./transport/x365/... ./transport/ninja/... ./transport/oppa/... ./transport/miu/... ./transport/sntp_eclipse/... ./common/convert/... ./adapter/... ./adapter/outboundgroup/... ./component/smart/..."
+          RUN=()
+          for t in $TARGETS; do
+            dir="${t#./}"
+            dir="${dir%/...}"
+            if [ -d "$dir" ]; then
+              RUN+=("$t")
+            else
+              echo "::notice::skip $t (directory $dir does not exist)"
+            fi
+          done
+          if [ ${#RUN[@]} -eq 0 ]; then
+            echo "::error::no test package found"
+            exit 1
+          fi
+          echo "go test ${RUN[*]} -count=1"
+          go test "${RUN[@]}" -count=1
+
+      - name: Core wrapper build (module core)
+        working-directory: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build ./...

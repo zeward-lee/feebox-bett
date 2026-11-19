@@ -61,3 +61,23 @@ jobs:
         run: |
           set -euo pipefail
           go build ./...
+
+      - name: Build Windows core binary
+        working-directory: core/Clash.Meta
+        shell: bash
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          go build -trimpath -ldflags "-s -w" -o mihomo.exe .
+          ls -l mihomo.exe
+
+      - name: Upload core binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-windows-amd64
+          path: core/Clash.Meta/mihomo.exe
+          archive: false
+          if-no-files-found: error

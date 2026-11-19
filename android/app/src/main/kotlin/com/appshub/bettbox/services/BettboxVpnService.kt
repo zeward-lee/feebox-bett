@@ -135,18 +135,29 @@ class BettboxVpnService : VpnService(), BaseServiceInterface {
         val accessControl = options.accessControl
         if (accessControl.enable) {
             when (accessControl.mode) {
+                // 不再把自身加入白名单：Bettbox 自身流量必须绕过 VPN，否则更新订阅/访问内网会自环（errno 103）
                 AccessControlMode.acceptSelected -> {
-                    (accessControl.acceptList + packageName).filter { it.isNotBlank() }.distinct().forEach { appPkg ->
+                    accessControl.acceptList.filter { it.isNotBlank() }.distinct().forEach { appPkg ->
                         runCatching { addAllowedApplication(appPkg) }
                             .onFailure { Log.e(TAG, "Failed to allow package $appPkg: ${it.message}", it) }
                     }
                 }
+                // 黑名单模式只排除列表内应用，自身由下面的 addDisallowedApplication 统一排除
                 AccessControlMode.rejectSelected -> (accessControl.rejectList - packageName).filter { it.isNotBlank() }.distinct().forEach { appPkg ->
                     runCatching { addDisallowedApplication(appPkg) }
                         .onFailure { Log.e(TAG, "Failed to disallow package $appPkg: ${it.message}", it) }
                 }
             }
         }
+
+        // 无论是否启用应用分流，都必须把 Bettbox 自身排除在 VPN 之外：
+        // 否则 App 自身的请求（订阅更新、访问内网如 192.168.2.1）会被自己的 TUN 捕获形成回环，
+        // 表现为 errno 103 Software caused connection abort。
+        // 注意：Builder 的 addAllowedApplication/addDisallowedApplication 互斥，
+        // acceptSelected 模式下若已添加白名单，此处会抛 UnsupportedOperationException 被 runCatching 吞掉，
+        // 而该模式下未在白名单中的自身本就不会被捕获，行为仍然正确。
+        runCatching { addDisallowedApplication(packageName) }
+            .onFailure { Log.e(TAG, "Failed to exclude self from VPN: ${it.message}", it) }
 
         setSession("Bettbox")
         setBlocking(false)

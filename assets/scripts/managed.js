@@ -4,7 +4,7 @@
  * 自定义分流远程规则集：@appshubcc https://github.com/appshubcc/bett-rules 
  */
 
-// @version 2026111105
+// @version 2026111901
 const Compatible_With_Bettbox = { ruleOptionsEnable: true };
 
 const ruleOptionsEnable = {
@@ -30,6 +30,7 @@ const ruleOptionsEnable = {
   'AdBlock': true,
 
   '极简国内外分流模式': false,
+  '智能选路（smart）': true,
   '生成地区自动选择组': false,
   '隐藏地区手动选择组': false,
   '分流组添加所有节点': false,
@@ -803,10 +804,25 @@ function filterAndNormalizeProxies(config) {
 
 /**
  * 构建地区策略组，可附带自动选择组
+ * 智能选路（smart）开启时：地区组直接生成 smart 类型策略组，不再嵌套 select + url-test
  */
 function createRegionGroup(name, icon, proxies) {
   const generateRegionAutoSelectEnabled = ruleOptionsEnable.生成地区自动选择组 || ruleOptionsEnable.隐藏地区手动选择组;
   const hideManualSelectGroupEnabled = ruleOptionsEnable.隐藏地区手动选择组;
+  const smartRoutingEnabled = ruleOptionsEnable['智能选路（smart）'];
+
+  if (smartRoutingEnabled) {
+    return [
+      {
+        ...groupBaseOption,
+        type: 'smart',
+        name,
+        icon,
+        proxies,
+        hidden: hideManualSelectGroupEnabled,
+      },
+    ];
+  }
 
   if (generateRegionAutoSelectEnabled) {
     const urlTestName = `${name}-自动选择`;
@@ -964,7 +980,10 @@ function buildFunctionalGroups(filteredProxies, generatedRegionGroups) {
   const finalRuleProviders = { ...baseRuleProviders };
 
   const allProxiesNames = filteredProxies.map((p) => p.name);
-  const groupNamesOfSelect = generatedRegionGroups.filter((g) => g.type === 'select').map((g) => g.name);
+  // 地区组可能是 select（默认）或 smart（智能选路开启），两者都要进默认代理/分流的候选列表
+  const groupNamesOfSelect = generatedRegionGroups
+    .filter((g) => g.type === 'select' || g.type === 'smart')
+    .map((g) => g.name);
   const baseGroupNames = baseGroups.filter((g) => ruleOptionsEnable[g.name]).map((g) => g.name);
 
   if (minimalModeEnabled) {

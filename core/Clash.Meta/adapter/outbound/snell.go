@@ -28,6 +28,7 @@ type Snell struct {
 	*Base
 	option          *SnellOption
 	psk             []byte
+	userKey         []byte
 	pool            *snell.Pool
 	obfsOption      *simpleObfsOption
 	shadowTLSOption *shadowtls.ShadowTLSOption
@@ -51,6 +52,7 @@ type SnellOption struct {
 	Server            string         `proxy:"server"`
 	Port              int            `proxy:"port"`
 	Psk               string         `proxy:"psk"`
+	UserKey           string         `proxy:"userkey,omitempty"`
 	UDP               bool           `proxy:"udp,omitempty"`
 	Version           int            `proxy:"version,omitempty"`
 	Reuse             bool           `proxy:"reuse,omitempty"`
@@ -298,7 +300,7 @@ func (s *Snell) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.
 	}
 
 	if metadata.NetWork == C.UDP {
-		err = snell.WriteUDPHeader(c, s.version)
+		err = snell.WriteUDPHeader(c, s.version, s.userKey)
 		if err == nil && s.version >= snell.Version4 {
 			if sc, ok := c.(*snell.Snell); ok {
 				err = sc.ReadReply()
@@ -306,7 +308,7 @@ func (s *Snell) writeHeaderContext(ctx context.Context, c net.Conn, metadata *C.
 		}
 		return
 	}
-	err = snell.WriteHeaderWithReuse(c, metadata.String(), uint(metadata.DstPort), s.version, s.reuse)
+	err = snell.WriteHeader(c, metadata.String(), metadata.DstPort, s.version, s.reuse, s.userKey)
 	return
 }
 
@@ -566,6 +568,13 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		// Snell v5 servers are backward-compatible with v4 clients.
 		option.Version = snell.Version4
 	}
+	userKey := []byte(option.UserKey)
+	if len(userKey) > snell.MaxClientIDLength {
+		return nil, fmt.Errorf("snell %s userkey must be at most 255 bytes", addr)
+	}
+	if len(userKey) > 0 && option.Version != snell.Version6 {
+		return nil, fmt.Errorf("snell %s userkey is only supported on version 6", addr)
+	}
 	// An OIX v4 node keeps its session reusable by default: the identity header
 	// makes a warm session cheap, and the vendor client prewarms one per node.
 	reuse := option.Version == snell.Version2 ||
@@ -621,6 +630,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 		}),
 		option:                &option,
 		psk:                   psk,
+		userKey:               userKey,
 		obfsOption:            obfsOption,
 		shadowTLSOption:       shadowTLSOpt,
 		restlsConfig:          restlsConfig,

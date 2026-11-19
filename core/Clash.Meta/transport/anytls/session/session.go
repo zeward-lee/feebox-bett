@@ -307,7 +307,7 @@ func (s *Session) recvLoop() error {
 						return err
 					}
 					if s.isClient {
-						log.Warnln("[Alert from server] %s", string(buffer))
+						log.Errorln("[Alert from server] %s", string(buffer))
 					}
 					pool.Put(buffer)
 					return nil

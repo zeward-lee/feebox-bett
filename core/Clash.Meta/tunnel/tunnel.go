@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -68,6 +69,8 @@ var (
 	sniffingEnable    = false
 
 	ruleUpdateCallback = utils.NewCallback[P.RuleProvider]()
+
+	countryCodeRegex = regexp.MustCompile(`(?i)^[A-Z]{2}$`)
 )
 
 type tunnel struct{}
@@ -76,17 +79,6 @@ var Tunnel = tunnel{}
 var _ C.Tunnel = Tunnel
 var _ P.Tunnel = Tunnel
 var _ proxydialer.Tunnel = Tunnel
-
-func init() {
-	statistic.IsDirectFunc = func(name string) bool {
-		configMux.RLock()
-		defer configMux.RUnlock()
-		if proxy, ok := proxies[name]; ok {
-			return proxy.Type() == C.Direct
-		}
-		return false
-	}
-}
 
 func (t tunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
 	connCtx := icontext.NewConnContext(conn, metadata)
@@ -214,12 +206,16 @@ func Listeners() map[string]C.InboundListener {
 }
 
 // UpdateRules handle update rules
-func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
+func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, newRuleProviders map[string]P.RuleProvider) (oldRules []C.Rule, oldSubRule map[string][]C.Rule, oldRuleProviders map[string]P.RuleProvider) {
 	configMux.Lock()
+	oldRules = rules
+	oldSubRule = subRules
+	oldRuleProviders = ruleProviders
 	rules = newRules
-	ruleProviders = rp
+	ruleProviders = newRuleProviders
 	subRules = newSubRule
 	configMux.Unlock()
+	return
 }
 
 // Proxies return all proxies
@@ -238,11 +234,14 @@ func RuleProviders() map[string]P.RuleProvider {
 }
 
 // UpdateProxies handle update proxies
-func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) {
+func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) (oldProxies map[string]C.Proxy, oldProviders map[string]P.ProxyProvider) {
 	configMux.Lock()
+	oldProxies = proxies
+	oldProviders = providers
 	proxies = newProxies
 	providers = newProviders
 	configMux.Unlock()
+	return
 }
 
 func UpdateListeners(newListeners map[string]C.InboundListener) {
@@ -362,7 +361,7 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		FindProcess: func() {
 			if attemptProcessLookup {
 				attemptProcessLookup = false
-				if !features.Android {
+				if !features.CMFA {
 					// normal check for process
 					uid, path, err := process.FindProcessName(metadata.NetWork.String(), metadata.SrcIP, int(metadata.SrcPort))
 					if err != nil {
@@ -480,21 +479,6 @@ func handleUDPConn(packet C.PacketAdapter) {
 				return nil, nil, err
 			}
 
-			target := proxy
-			for a := proxy; a != nil; a = a.Unwrap(metadata, false) {
-				target = a
-			}
-			if target.Type() == C.Reject {
-				if rejector, ok := packet.(C.PacketRejector); ok {
-					_ = rejector.Reject()
-				}
-				logMetadataProxy(metadata, rule, proxy)
-				return nil, nil, errors.New("rejected")
-			} else if target.Type() == C.RejectDrop {
-				logMetadataProxy(metadata, rule, proxy)
-				return nil, nil, errors.New("reject dropped")
-			}
-
 			dialMetadata := metadata.Pure()
 			ctx, cancel := context.WithTimeout(context.Background(), C.DefaultUDPTimeout)
 			defer cancel()
@@ -508,7 +492,10 @@ func handleUDPConn(packet C.PacketAdapter) {
 			}
 			logMetadata(metadata, rule, rawPc)
 
-			pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, metadata, rule, 0, 0, true)
+			// recover info to dialMetadata for smart
+			dialMetadata.Host = metadata.Host
+
+			pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, dialMetadata, rule, 0, 0, true)
 
 			sender.AddMapping(originMetadata, dialMetadata)
 			oAddrPort := dialMetadata.AddrPort()
@@ -644,7 +631,10 @@ func handleTCPConn(connCtx C.ConnContext) {
 	}
 	logMetadata(metadata, rule, remoteConn)
 
-	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
+	// recover info to dialMetadata for smart
+	dialMetadata.Host = metadata.Host
+
+	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, dialMetadata, rule, int64(peekLen), 0, true)
 	defer func(remoteConn C.Conn) {
 		_ = remoteConn.Close()
 	}(remoteConn)
@@ -683,26 +673,6 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 	}
 }
 
-func logMetadataProxy(metadata *C.Metadata, rule C.Rule, proxy C.Proxy) {
-	name := proxy.Name()
-	switch {
-	case metadata.SpecialProxy != "":
-		log.Infoln("[%s] %s --> %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), name)
-	case rule != nil:
-		if rule.Payload() != "" {
-			log.Infoln("[%s] %s --> %s match %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), fmt.Sprintf("%s(%s)", rule.RuleType().String(), rule.Payload()), name)
-		} else {
-			log.Infoln("[%s] %s --> %s match %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), rule.RuleType().String(), name)
-		}
-	case mode == Global:
-		log.Infoln("[%s] %s --> %s using GLOBAL", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
-	case mode == Direct:
-		log.Infoln("[%s] %s --> %s using DIRECT", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
-	default:
-		log.Infoln("[%s] %s --> %s doesn't match any rule using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), name)
-	}
-}
-
 func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, error) {
 	configMux.RLock()
 	defer configMux.RUnlock()
@@ -719,8 +689,20 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 					continue
 				}
 
+				// set target for Smart gorup nodes selected
+				if smartRuleType(rule.RuleType()) {
+					if rule.RuleType() != C.GEOIP || !countryCodeRegex.MatchString(rule.Payload()) {
+						metadata.SmartTarget = fmt.Sprintf("%s [%s]", rule.RuleType().String(), rule.Payload())
+					}
+				}
+
+				smart := false
+
 				// parse multi-layer nesting
 				for adapter := adapter; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
+					if adapter.Type() == C.Smart {
+						smart = true
+					}
 					if adapter.Type() == C.Pass {
 						log.Debugln("%s match Pass rule", adapter.Name())
 						continue GetRules
@@ -731,6 +713,12 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 						rematchRule = rule
 						break GetRules
 					}
+				}
+
+				if ! smart {
+					metadata.SmartTarget = ""
+				} else {
+					metadata.SmartBlock = "normal"
 				}
 
 				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
@@ -772,7 +760,7 @@ func getRules(metadata *C.Metadata) []C.Rule {
 	}
 }
 
-func shouldStopRetry(err error) bool {
+func ShouldStopRetry(err error) bool {
 	if errors.Is(err, resolver.ErrIPNotFound) {
 		return true
 	}
@@ -796,7 +784,7 @@ func retry[T any](ctx context.Context, ft func(context.Context) (T, error), fe f
 			if fe != nil {
 				fe(err)
 			}
-			if shouldStopRetry(err) {
+			if ShouldStopRetry(err) {
 				return
 			}
 			if s.Wait(ctx) == nil {
@@ -809,4 +797,8 @@ func retry[T any](ctx context.Context, ft func(context.Context) (T, error), fe f
 		}
 	}
 	return
+}
+
+func smartRuleType(rt C.RuleType) bool {
+	return C.SmartRuleTypes[rt]
 }

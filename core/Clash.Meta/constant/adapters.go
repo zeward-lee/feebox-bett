@@ -30,6 +30,7 @@ const (
 	Fallback
 	URLTest
 	LoadBalance
+	Smart
 
 	Shadowsocks
 	ShadowsocksR
@@ -93,9 +94,8 @@ const (
 	DefaultUDPTimeout = dialer.DefaultUDPTimeout
 	DefaultDropTime   = 12 * DefaultTCPTimeout
 	DefaultTLSTimeout = DefaultTCPTimeout
+	DefaultTestURL    = "https://www.gstatic.com/generate_204"
 )
-
-var DefaultTestURL = "https://www.gstatic.com/generate_204"
 
 var ErrNotSupport = errors.New("no support")
 
@@ -200,9 +200,11 @@ type Proxy interface {
 	Adapter() ProxyAdapter
 	AliveForTestUrl(url string) bool
 	DelayHistory() []DelayHistory
+	DelayHistoryForTestUrl(url string) []DelayHistory
 	ExtraDelayHistories() map[string]ProxyState
 	LastDelayForTestUrl(url string) uint16
 	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error)
+	StatusTest(ctx context.Context, url string) (status uint16, ok bool, err error)
 }
 
 // AdapterType is enum of adapter type
@@ -312,6 +314,8 @@ func (at AdapterType) String() string {
 		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
+	case Smart:
+		return "Smart"
 	default:
 		return "Unknown"
 	}

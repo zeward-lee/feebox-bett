@@ -15,12 +15,10 @@ import (
 func upgradeRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Post("/ui", updateUI)
-	r.Post("/", func(w http.ResponseWriter, r *http.Request) {
-		render.Status(r, http.StatusForbidden)
-		render.JSON(w, r, newError("Not supported"))
-	})
-	if !embedMode {
+	if !embedMode { // disallow upgrade core/geo in embed mode
+		r.Post("/", upgradeCore)
 		r.Post("/geo", updateGeoDatabases)
+		r.Post("/lgbm", updateLgbmModel)
 	}
 	return r
 }
@@ -57,6 +55,21 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 
 func updateUI(w http.ResponseWriter, r *http.Request) {
 	err := updater.DefaultUiUpdater.DownloadUI()
+	if err != nil {
+		log.Warnln("%s", err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
+		return
+	}
+
+	render.JSON(w, r, render.M{"status": "ok"})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func updateLgbmModel(w http.ResponseWriter, r *http.Request) {
+	err := updater.UpdateLgbmModelDatabase()
 	if err != nil {
 		log.Warnln("%s", err)
 		render.Status(r, http.StatusInternalServerError)

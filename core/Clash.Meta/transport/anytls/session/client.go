@@ -35,9 +35,6 @@ type Client struct {
 	idleSessionTimeout time.Duration
 	minIdleSession     int
 	disableReuse       bool
-
-	idleSessionCheckInterval time.Duration
-	idleCleanupOnce          sync.Once
 }
 
 func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string, idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, disableReuse bool) *Client {
@@ -56,8 +53,11 @@ func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.P
 	if c.idleSessionTimeout <= time.Second*5 {
 		c.idleSessionTimeout = time.Second * 30
 	}
-	c.idleSessionCheckInterval = idleSessionCheckInterval
 	c.die, c.dieCancel = context.WithCancel(ctx)
+	c.idleSession = skiplist.NewSkipList[uint64, *Session]()
+	if !c.disableReuse {
+		util.StartRoutine(c.die, idleSessionCheckInterval, c.idleCleanup)
+	}
 	return c
 }
 
@@ -113,7 +113,7 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 
 func (c *Client) getIdleSession() (idle *Session) {
 	c.idleSessionLock.Lock()
-	if c.idleSession != nil && !c.idleSession.IsEmpty() {
+	if !c.idleSession.IsEmpty() {
 		it := c.idleSession.Iterate()
 		idle = it.Value()
 		c.idleSession.Remove(it.Key())
@@ -127,7 +127,6 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.startIdleCleanup()
 
 	session := NewClientSession(underlying, c.padding, c.clientMetadata)
 	session.seq = c.sessionCounter.Add(1)

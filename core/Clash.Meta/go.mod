@@ -37,7 +37,7 @@ require (
 	github.com/metacubex/sing v0.5.9
 	github.com/metacubex/sing-mux v0.3.12
 	github.com/metacubex/sing-quic v0.0.0-20260904234848-1c242664697a
-	github.com/metacubex/sing-shadowsocks v0.2.13
+	github.com/metacubex/sing-shadowsocks v0.2.14
 	github.com/metacubex/sing-shadowsocks2 v0.2.8
 	github.com/metacubex/sing-tun v0.4.29
 	github.com/metacubex/sing-vmess v0.2.5
@@ -56,6 +56,7 @@ require (
 	github.com/samber/lo v1.53.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/stretchr/testify v1.12.1
+	github.com/vernesong/leaves v0.0.0-20260629081247-2a1c022f37d0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	gitlab.com/go-extension/aes-ccm v0.0.0-20230221065045-e58665ef23c7
@@ -151,5 +152,4 @@ require (
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
 
 // Local fork: ViewTurbo (#VT) and blackstone (#BLACKSTONE) variants.
-// The shipped build is the `core` module, which carries the same replace.
 replace github.com/metacubex/sing-shadowsocks2 => ../sing-shadowsocks2

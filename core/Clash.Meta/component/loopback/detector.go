@@ -17,7 +17,10 @@ import (
 var disableLoopBackDetector, _ = strconv.ParseBool(os.Getenv("DISABLE_LOOPBACK_DETECTOR"))
 
 func init() {
-	if features.CMFA {
+	// TUN on Android always sees its own traffic as loopback-capable; the upstream
+	// CMFA switch does not cover a plain Android build like Bettbox, whose VPN
+	// connections to LAN targets would be rejected with ErrReject.
+	if features.Android {
 		disableLoopBackDetector = true
 	}
 }

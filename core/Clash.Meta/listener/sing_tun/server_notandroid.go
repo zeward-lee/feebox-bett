@@ -1,4 +1,4 @@
-//go:build !android || cmfa
+//go:build !(android && cmfa)
 
 package sing_tun
 

@@ -437,7 +437,12 @@ extension GroupsExt on List<Group> {
 }
 
 extension GroupExt on Group {
-  String get realNow => now ?? '';
+  String get realNow {
+    final n = now ?? '';
+    // smart 组未手动锁定节点时内核返回占位串，按"未选择"处理。
+    if (type == GroupType.Smart && n == 'Smart - Select') return '';
+    return n;
+  }
 
   String getCurrentSelectedName(String proxyName) {
     if (type.isComputedSelected) {

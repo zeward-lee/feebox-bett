@@ -39,12 +39,14 @@ const desktopPlatforms = [
 enum GroupType {
   Selector,
   URLTest,
+  Smart,
   Fallback,
   LoadBalance;
 
   static GroupType parseProfileType(String type) {
     return switch (type) {
       'url-test' => URLTest,
+      'smart' => Smart,
       'select' => Selector,
       'fallback' => Fallback,
       'load-balance' => LoadBalance,
@@ -60,7 +62,11 @@ extension GroupTypeExtension on GroupType {
       GroupType.values.map((e) => e.toString().split('.').last).toList();
 
   bool get isComputedSelected {
-    return [GroupType.URLTest, GroupType.Fallback].contains(this);
+    return [
+      GroupType.URLTest,
+      GroupType.Smart,
+      GroupType.Fallback,
+    ].contains(this);
   }
 
   static GroupType? getGroupType(String value) {

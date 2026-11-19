@@ -48,6 +48,7 @@ Map<String, dynamic> _$ProxyGroupToJson(_ProxyGroup instance) =>
 const _$GroupTypeEnumMap = {
   GroupType.Selector: 'Selector',
   GroupType.URLTest: 'URLTest',
+  GroupType.Smart: 'Smart',
   GroupType.Fallback: 'Fallback',
   GroupType.LoadBalance: 'LoadBalance',
 };

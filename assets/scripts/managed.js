@@ -4,7 +4,7 @@
  * 自定义分流远程规则集：@appshubcc https://github.com/appshubcc/bett-rules 
  */
 
-// @version 2026111901
+// @version 2026112001
 const Compatible_With_Bettbox = { ruleOptionsEnable: true };
 
 const ruleOptionsEnable = {
@@ -76,7 +76,10 @@ const directProxies = [
 
 
 const iconBaseUrl = 'https://cdn.jsdelivr.net/gh/appshubcc/Qure_Style_SVG@main/icon/svg/';
-const ruleSetBaseUrl = 'https://cdn.jsdelivr.net/gh/appshubcc/bett-rules@meta/geo/';
+// 2026-11-20 规则集改为内网镜像（路由器 http://192.168.2.1/sub/rules/，由 extractd 侧维护），
+// 避免移动端在 VPN/代理下被取消（context canceled）导致配置导入失败；外出场景首次拉取会失败，
+// mihomo 会缓存已下载的 ruleset，之后离线可用。
+const ruleSetBaseUrl = 'http://192.168.2.1/sub/rules/';
 const directTestUrl = 'http://dns.alidns.com';
 
 const regionDefinitions = [

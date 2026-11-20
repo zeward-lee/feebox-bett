@@ -36,9 +36,13 @@ class EditProfileViewState extends State<EditProfileView> {
   late TextEditingController autoUpdateDurationController;
   late bool autoUpdate;
   late bool managed = widget.profile.managed;
+  late bool useProxy = widget.profile.useProxy;
   late TextEditingController ageSecretKeyController;
+  late TextEditingController userAgentController;
   FocusNode? urlFocusNode;
   bool _obscureAgeSecretKey = true;
+  List<String> _uaHistory = const [];
+  static const _clearUaHistoryValue = '__clear_ua_history__';
   String? rawText;
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final fileInfoNotifier = ValueNotifier<FileInfo?>(null);
@@ -58,6 +62,15 @@ class EditProfileViewState extends State<EditProfileView> {
     ageSecretKeyController = TextEditingController(
       text: widget.profile.ageSecretKey,
     );
+    userAgentController = TextEditingController(
+      text: widget.profile.userAgent ?? '',
+    );
+    unawaited(
+      ToolHistoryStore.instance.load(userAgentHistoryKey).then((items) {
+        if (!mounted) return;
+        setState(() => _uaHistory = items);
+      }),
+    );
     if (widget.isNew) {
       final focusNode = urlFocusNode = FocusNode();
       unawaited(focusNode.requestFocusWhenIdle());
@@ -75,6 +88,7 @@ class EditProfileViewState extends State<EditProfileView> {
     urlController.dispose();
     autoUpdateDurationController.dispose();
     ageSecretKeyController.dispose();
+    userAgentController.dispose();
     urlFocusNode?.dispose();
     fileInfoNotifier.dispose();
     super.dispose();
@@ -83,6 +97,7 @@ class EditProfileViewState extends State<EditProfileView> {
   Future<void> _handleConfirm() async {
     if (!_formKey.currentState!.validate()) return;
     final appController = globalState.appController;
+    final userAgent = userAgentController.text.trim();
     Profile profile = this.profile.copyWith(
       url: urlController.text,
       label: labelController.text.trim().isEmpty
@@ -91,6 +106,8 @@ class EditProfileViewState extends State<EditProfileView> {
       ageSecretKey: ageSecretKeyController.text.trim().isEmpty
           ? null
           : ageSecretKeyController.text.trim(),
+      userAgent: userAgent.isEmpty ? null : userAgent,
+      useProxy: useProxy,
       autoUpdate: autoUpdate,
       managed: managed,
       autoUpdateDuration: Duration(
@@ -388,6 +405,60 @@ class EditProfileViewState extends State<EditProfileView> {
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextFormField(
+            textInputAction: TextInputAction.next,
+            controller: userAgentController,
+            maxLines: 1,
+            minLines: 1,
+            decoration: InputDecoration(
+              labelText: appLocalizations.profileUserAgent,
+              hintText: appLocalizations.profileUserAgentHint,
+              suffixIcon: PopupMenuButton<String>(
+                icon: const Icon(Icons.history_rounded),
+                tooltip: appLocalizations.profileUserAgentHistory,
+                itemBuilder: (_) => [
+                  for (final item in _uaHistory)
+                    PopupMenuItem<String>(
+                      value: item,
+                      child: Text(
+                        item,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  if (_uaHistory.isNotEmpty)
+                    PopupMenuItem<String>(
+                      value: _clearUaHistoryValue,
+                      child: Text(appLocalizations.toolHistoryClear),
+                    ),
+                ],
+                onSelected: (value) async {
+                  if (value == _clearUaHistoryValue) {
+                    try {
+                      await ToolHistoryStore.instance.clear(
+                        userAgentHistoryKey,
+                      );
+                    } catch (_) {}
+                    if (mounted) {
+                      setState(() => _uaHistory = const []);
+                    }
+                    return;
+                  }
+                  userAgentController.text = value;
+                },
+              ),
+            ),
+            validator: (String? value) {
+              if (value == null) return null;
+              if (value.codeUnits.any((unit) => unit < 0x20 || unit == 0x7f)) {
+                return appLocalizations.profileUserAgentInvalidDesc;
+              }
+              return null;
+            },
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: CommonCard(
             type: CommonCardType.filled,
             radius: 16,
@@ -424,6 +495,21 @@ class EditProfileViewState extends State<EditProfileView> {
               },
             ),
           ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: CommonCard(
+            type: CommonCardType.filled,
+            radius: 16,
+            child: ListItem.switchItem(
+              title: Text(appLocalizations.profileUseProxy),
+              subtitle: Text(appLocalizations.profileUseProxyDesc),
+              delegate: SwitchDelegate<bool>(
+                value: useProxy,
+                onChanged: (value) => setState(() => useProxy = value),
+              ),
+            ),
+          ),
+        ),
       ],
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),

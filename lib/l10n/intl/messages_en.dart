@@ -1718,6 +1718,24 @@ class MessageLookup extends MessageLookupByLibrary {
     "profileUrlInvalidValidationDesc": MessageLookupByLibrary.simpleMessage(
       "Please enter a valid URL",
     ),
+    "profileUseProxy": MessageLookupByLibrary.simpleMessage(
+      "Use proxy when updating",
+    ),
+    "profileUseProxyDesc": MessageLookupByLibrary.simpleMessage(
+      "When disabled, subscription requests connect directly without the core proxy",
+    ),
+    "profileUserAgent": MessageLookupByLibrary.simpleMessage(
+      "Custom User-Agent",
+    ),
+    "profileUserAgentHint": MessageLookupByLibrary.simpleMessage(
+      "Leave empty to use the default UA",
+    ),
+    "profileUserAgentHistory": MessageLookupByLibrary.simpleMessage(
+      "User-Agent history",
+    ),
+    "profileUserAgentInvalidDesc": MessageLookupByLibrary.simpleMessage(
+      "User-Agent cannot contain control characters",
+    ),
     "profileUrlNullValidationDesc": MessageLookupByLibrary.simpleMessage(
       "Please enter a profile URL",
     ),

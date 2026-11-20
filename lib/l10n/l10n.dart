@@ -1340,6 +1340,66 @@ class AppLocalizations {
     );
   }
 
+  /// `Custom User-Agent`
+  String get profileUserAgent {
+    return Intl.message(
+      'Custom User-Agent',
+      name: 'profileUserAgent',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `Leave empty to use the default UA`
+  String get profileUserAgentHint {
+    return Intl.message(
+      'Leave empty to use the default UA',
+      name: 'profileUserAgentHint',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `User-Agent history`
+  String get profileUserAgentHistory {
+    return Intl.message(
+      'User-Agent history',
+      name: 'profileUserAgentHistory',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `User-Agent cannot contain control characters`
+  String get profileUserAgentInvalidDesc {
+    return Intl.message(
+      'User-Agent cannot contain control characters',
+      name: 'profileUserAgentInvalidDesc',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `Use proxy when updating`
+  String get profileUseProxy {
+    return Intl.message(
+      'Use proxy when updating',
+      name: 'profileUseProxy',
+      desc: '',
+      args: [],
+    );
+  }
+
+  /// `When disabled, subscription requests connect directly without the core proxy`
+  String get profileUseProxyDesc {
+    return Intl.message(
+      'When disabled, subscription requests connect directly without the core proxy',
+      name: 'profileUseProxyDesc',
+      desc: '',
+      args: [],
+    );
+  }
+
   /// `Theme Mode`
   String get themeMode {
     return Intl.message('Theme Mode', name: 'themeMode', desc: '', args: []);

@@ -42,7 +42,18 @@ class Request {
   String? userAgent;
 
   Request() {
-    _dio = Dio(BaseOptions(headers: {'User-Agent': browserUa}));
+    // NOTE: 在 Android 上不显式设置超时时，dio 会把 HttpClient.connectionTimeout
+    // 置为 null，socket 层超时后上报的 connectTimeout 退化为 Duration.zero
+    // （实测报错 `connection timeout ... 0:00:00.000000`，表现为立即中止），
+    // 因此这里必须显式给值，不能依赖默认值。
+    _dio = Dio(
+      BaseOptions(
+        headers: {'User-Agent': browserUa},
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(minutes: 5),
+        sendTimeout: const Duration(seconds: 30),
+      ),
+    );
     _dio.httpClientAdapter = IOHttpClientAdapter(
       createHttpClient: () {
         final client = HttpClient();
@@ -50,7 +61,15 @@ class Request {
         return client;
       },
     );
-    _clashDio = Dio();
+    // 订阅下载/请求走 _clashDio；同样必须显式设置超时（原因见上）。
+    // receive 放宽到 5 分钟，容纳较大的订阅文件。
+    _clashDio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(minutes: 5),
+        sendTimeout: const Duration(seconds: 30),
+      ),
+    );
     _clashDio.httpClientAdapter = IOHttpClientAdapter(
       createHttpClient: () {
         final client = HttpClient();

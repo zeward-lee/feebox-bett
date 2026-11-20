@@ -215,10 +215,12 @@ class EditProfileViewState extends State<EditProfileView> {
       return patchedMessage.isEmpty ? '' : originalMessage;
     }, silence: false);
     if (message?.isNotEmpty == true) {
-      globalState.showMessage(
-        title: appLocalizations.tip,
-        message: TextSpan(text: message),
-        cancelable: false,
+      unawaited(
+        globalState.showMessage(
+          title: appLocalizations.tip,
+          message: TextSpan(text: message),
+          cancelable: false,
+        ),
       );
       return;
     }
@@ -252,7 +254,7 @@ class EditProfileViewState extends State<EditProfileView> {
           message: TextSpan(text: appLocalizations.hasCacheChange),
         );
         if (res == true && context.mounted) {
-          _handleSaveEdit(context, content);
+          unawaited(_handleSaveEdit(context, content));
         } else {
           return true;
         }
@@ -306,7 +308,7 @@ class EditProfileViewState extends State<EditProfileView> {
       title: appLocalizations.tip,
     );
     if (res != true || !mounted) return;
-    context.showNotifier(appLocalizations.exportSuccess);
+    unawaited(context.showNotifier(appLocalizations.exportSuccess));
   }
 
   Future<void> _handleBack() async {
@@ -315,7 +317,7 @@ class EditProfileViewState extends State<EditProfileView> {
       message: TextSpan(text: appLocalizations.fileIsUpdate),
     );
     if (res == true) {
-      _handleConfirm();
+      unawaited(_handleConfirm());
     } else {
       if (mounted) {
         Navigator.of(context).pop();
@@ -381,7 +383,7 @@ class EditProfileViewState extends State<EditProfileView> {
               labelText: appLocalizations.ageSecretKeyOptional,
               hintText: 'AGE-SECRET-KEY-...',
               suffixIcon: IconButton(
-                icon: Icon(
+                icon: AppIcon(
                   _obscureAgeSecretKey
                       ? Icons.visibility
                       : Icons.visibility_off,
@@ -534,7 +536,7 @@ class EditProfileViewState extends State<EditProfileView> {
                   style: IconButton.styleFrom(
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  icon: const Icon(Icons.settings_outlined),
+                  icon: const AppIcon(Icons.settings_outlined),
                 ),
               ],
             ),
@@ -571,17 +573,17 @@ class EditProfileViewState extends State<EditProfileView> {
                                 spacing: 12,
                                 children: [
                                   CommonChip(
-                                    avatar: const Icon(Icons.edit),
+                                    avatar: const AppIcon(Icons.edit),
                                     label: appLocalizations.edit,
                                     onPressed: _editProfileFile,
                                   ),
                                   CommonChip(
-                                    avatar: const Icon(Icons.upload),
+                                    avatar: const AppIcon(Icons.upload),
                                     label: appLocalizations.upload,
                                     onPressed: _uploadProfileFile,
                                   ),
                                   CommonChip(
-                                    avatar: const Icon(Icons.download),
+                                    avatar: const AppIcon(Icons.download),
                                     label: appLocalizations.exportFile,
                                     onPressed: _exportProfileFile,
                                   ),
@@ -613,7 +615,7 @@ class EditProfileViewState extends State<EditProfileView> {
             heroTag: null,
             onPressed: _handleConfirm,
             label: Text(appLocalizations.save),
-            icon: const Icon(Icons.save),
+            icon: const AppIcon(Icons.save),
           ),
         ),
         child: Form(
@@ -752,7 +754,7 @@ class _AgeKeyGeneratorDialogState extends State<_AgeKeyGeneratorDialog> {
     if (text.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted) {
-      context.showNotifier(appLocalizations.copySuccess);
+      unawaited(context.showNotifier(appLocalizations.copySuccess));
     }
   }
 
@@ -781,7 +783,7 @@ class _AgeKeyGeneratorDialogState extends State<_AgeKeyGeneratorDialog> {
               floatingLabelBehavior: FloatingLabelBehavior.always,
               labelText: appLocalizations.agePrivateKeyLabel,
               suffixIcon: IconButton(
-                icon: const Icon(Icons.copy),
+                icon: const AppIcon(Icons.copy),
                 onPressed: () => _copyToClipboard(_privateKeyController.text),
               ),
             ),
@@ -808,7 +810,7 @@ class _AgeKeyGeneratorDialogState extends State<_AgeKeyGeneratorDialog> {
                         ? TextStyle(color: context.colorScheme.primary)
                         : null),
               suffixIcon: IconButton(
-                icon: const Icon(Icons.copy),
+                icon: const AppIcon(Icons.copy),
                 onPressed: () => _copyToClipboard(_publicKeyController.text),
               ),
             ),

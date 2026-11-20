@@ -63,7 +63,7 @@ class BettboxHttpOverrides extends HttpOverrides {
     if (_isPrivateHost(url.host)) return 'DIRECT';
     final port = globalState.config.patchClashConfig.mixedPort;
     final isStart = globalState.appState.runTime != null;
-    if (!isStart) return 'DIRECT';
+    if (!isStart || port == 0) return 'DIRECT';
     return 'PROXY localhost:$port';
   }
 

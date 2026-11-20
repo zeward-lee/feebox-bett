@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/queue"
 	C "github.com/metacubex/mihomo/constant"
 )
 
 func newTestState() *internalProxyState {
 	return &internalProxyState{
-		alive: atomic.NewBool(true),
+		alive:   atomic.NewBool(true),
+		history: queue.New[C.DelayHistory](defaultHistoriesNum),
 	}
 }
 

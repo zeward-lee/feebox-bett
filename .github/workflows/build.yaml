@@ -285,7 +285,7 @@ jobs:
         run: |
           flutter pub get
           dart run build_runner build
-          dart setup.dart android --arch ${{ matrix.arch }} ${{ env.IS_STABLE == 'true' && '--env stable' || '' }} ${{ matrix.lite == true && '--lite' || '' }}
+          dart setup.dart android --arch ${{ matrix.arch }} ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
           ls -l dist/*.apk
 
       # Fail closed: a lane that fell back to debug signing must never publish.

@@ -48,9 +48,13 @@ const configKey = 'config';
 const customSidebarIconKey = 'custom_sidebar_icon';
 const customDashboardTitleKey = 'custom_dashboard_title';
 const lastManagedScriptVersionKey = 'last_managed_script_version';
+const findProcessModeMigratedKey = 'find_process_mode_migrated';
 const restartAutoStartKey = 'restart_auto_start';
 const double dialogCommonWidth = 300;
-const repository = 'appshubcc/Bettbox';
+// 升级提示与安装包下载必须指向我们的仓库，绝不能指向上游官方包：
+// 上游包不含私有协议（x365/xhttp/sntp-eclipse/ninja）、没有 Android 17
+// ACCESS_LOCAL_NETWORK 修复、没有测速地址与内核超时兜底。
+const repository = 'zeward-lee/feebox-bett';
 const ipInfoToken = String.fromEnvironment('IPINFO_TOKEN', defaultValue: '');
 const defaultExternalControllerPort = 9090;
 const maxMobileWidth = 600;

@@ -13,7 +13,10 @@ class BettboxHttpOverrides extends HttpOverrides {
   /// 内网地址必须直连，不能交给内核代理：否则请求会被内核按规则转给代理节点，
   /// 节点侧无法回源到用户局域网，最终表现为 502 / 订阅导入失败（Android 实测：
   /// 更新 http://192.168.2.1/sub/*.yaml 时报「导入失败」）。
-  static bool _isPrivateHost(String host) {
+  ///
+  /// 同时供局域网权限提示（`LocalNetworkPermission`）判断失败目标是否真的在私网，
+  /// 避免公网订阅超时被误诊为 ACCESS_LOCAL_NETWORK 未授予。
+  static bool isPrivateHost(String host) {
     // 去掉 IPv6 方括号形式，兼容 `[::1]` 这类 host。
     var lower = host.toLowerCase().trim();
     if (lower.startsWith('[') && lower.endsWith(']')) {
@@ -59,8 +62,8 @@ class BettboxHttpOverrides extends HttpOverrides {
     if (_isLoopback(url.host)) {
       return 'DIRECT';
     }
-    // 内网/私网地址一律直连（详见 _isPrivateHost 注释）。
-    if (_isPrivateHost(url.host)) return 'DIRECT';
+    // 内网/私网地址一律直连（详见 isPrivateHost 注释）。
+    if (isPrivateHost(url.host)) return 'DIRECT';
     final port = globalState.config.patchClashConfig.mixedPort;
     final isStart = globalState.appState.runTime != null;
     if (!isStart || port == 0) return 'DIRECT';

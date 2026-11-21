@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:bett_box/common/app_localizations.dart';
+import 'package:bett_box/common/http.dart';
 import 'package:bett_box/common/print.dart';
 import 'package:bett_box/common/system.dart';
 import 'package:bett_box/plugins/app.dart';
@@ -91,14 +92,31 @@ class LocalNetworkPermission {
         text.contains('连接超时');
   }
 
-  /// 订阅更新失败后调用：仅当错误像超时、且权限确实未授予时提示一次。
+  /// 订阅地址是否指向私网（判定逻辑与 HTTP 直连判定共用，避免两处漂移）。
+  static bool isPrivateUrl(String? url) {
+    if (url == null) return false;
+    var raw = url.trim();
+    if (raw.isEmpty) return false;
+    // 缺少 scheme 时补一个，保证 `192.168.1.1/sub` 这类写法也能取到 host。
+    if (!raw.contains('://')) raw = 'http://$raw';
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) return false;
+    return BettboxHttpOverrides.isPrivateHost(uri.host);
+  }
+
+  /// 订阅更新失败后调用：仅当错误像超时、权限确实未授予、且失败目标
+  /// [url] 真的在私网时提示一次。
+  ///
+  /// 公网订阅超时（弱网、机场限流）不是局域网权限问题，传 null 或公网 URL
+  /// 一律返回 false，让调用方走通用错误提示，避免误导用户去开无关权限。
   /// 提示里提供"去设置"入口，因为被系统标记为 USER_SENSITIVE_WHEN_DENIED 后
   /// 应用再也弹不出授权框，只能由用户到系统应用详情页手动开启。
   ///
   /// 返回 true 表示已经展示了本权限专属提示（调用方可据此跳过通用网络错误提示）。
-  static Future<bool> notifyUpdateFailed(Object error) async {
+  static Future<bool> notifyUpdateFailed(Object error, {String? url}) async {
     if (_tipShown) return false;
     if (!isUnreachableError(error)) return false;
+    if (!isPrivateUrl(url)) return false;
     if (!await isSupported()) return false;
     if (await isGranted()) return false;
     _tipShown = true;

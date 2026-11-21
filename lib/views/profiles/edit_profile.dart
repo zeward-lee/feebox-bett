@@ -123,7 +123,10 @@ class EditProfileViewState extends State<EditProfileView> {
       } on Object catch (e) {
         if (mounted) {
           final permissionTipShown =
-              await LocalNetworkPermission.notifyUpdateFailed(e);
+              await LocalNetworkPermission.notifyUpdateFailed(
+                e,
+                url: profile.url,
+              );
           if (!permissionTipShown) {
             await globalState.showMessage(
               title: appLocalizations.tip,
@@ -168,7 +171,10 @@ class EditProfileViewState extends State<EditProfileView> {
           await Future.delayed(commonDuration);
           await appController.updateProfile(profile);
         } on Object catch (e) {
-          if (!await LocalNetworkPermission.notifyUpdateFailed(e)) {
+          if (!await LocalNetworkPermission.notifyUpdateFailed(
+            e,
+            url: profile.url,
+          )) {
             await globalState.showMessage(
               title: appLocalizations.tip,
               message: TextSpan(

@@ -154,7 +154,8 @@ class _MergeProfileViewState extends ConsumerState<MergeProfileView> {
     ]);
   }
 
-  Future<void> _importPending() async {
+  /// 导入待确认的成员，返回 false 表示已展示局域网权限专属提示、无需再弹通用错误。
+  Future<bool> _importPending() async {
     final appController = globalState.appController;
     for (final member in List.of(_members)) {
       final url = _pending[member.id];
@@ -165,18 +166,22 @@ class _MergeProfileViewState extends ConsumerState<MergeProfileView> {
           url: url,
         ).copyWith(managed: true).update();
       } on Object catch (e) {
+        if (await LocalNetworkPermission.notifyUpdateFailed(e, url: url)) {
+          return false;
+        }
         throw '$url\n${e.formatError}';
       }
       final profile = imported.label == imported.id
           ? imported.copyWith(label: _hostOf(url))
           : imported;
       await appController.addProfile(profile);
-      if (!mounted) return;
+      if (!mounted) return false;
       _setMembers([
         for (final item in _members)
           item.id == member.id ? item.copyWith(id: profile.id) : item,
       ]);
     }
+    return true;
   }
 
   Future<void> _handleEditPrefix(BundleMember member, String label) async {
@@ -277,10 +282,7 @@ class _MergeProfileViewState extends ConsumerState<MergeProfileView> {
     final appController = globalState.appController;
     if (_pending.isNotEmpty) {
       final imported = await appController.safeRun<bool>(
-        () async {
-          await _importPending();
-          return true;
-        },
+        () => _importPending(),
         needLoading: true,
         silence: false,
       );

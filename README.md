@@ -4,7 +4,9 @@
 
 构建产物见 Releases。
 
-上游：[appshubcc/Bettbox](https://github.com/appshubcc/Bettbox)
+本项目：[zeward-lee/feebox-bett](https://github.com/zeward-lee/feebox-bett)
+
+上游代码基线：appshubcc/Bettbox（仅作来源说明；发布包与升级源均以本项目为准）
 
 ## 构建
 

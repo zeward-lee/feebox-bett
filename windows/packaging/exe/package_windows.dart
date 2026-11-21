@@ -110,10 +110,11 @@ void main(List<String> arguments) async {
     'APP_VERSION': appVersion,
     'EXECUTABLE_NAME': makeConfig['executable_name'] ?? 'Bettbox.exe',
     'DISPLAY_NAME': makeConfig['display_name'] ?? 'Bettbox',
-    'PUBLISHER_NAME': makeConfig['publisher'] ?? 'appshub.cc',
+    'PUBLISHER_NAME': makeConfig['publisher'] ?? 'zeward-lee',
     'ARCH': arch == 'arm64' ? 'arm64' : 'x64',
     'PUBLISHER_URL':
-        makeConfig['publisher_url'] ?? 'https://github.com/appshubcc/Bettbox',
+        makeConfig['publisher_url'] ??
+        'https://github.com/zeward-lee/feebox-bett',
     'CREATE_DESKTOP_ICON': true,
     'LAUNCH_AT_STARTUP': true,
     'INSTALL_DIR_NAME':

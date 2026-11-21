@@ -35,7 +35,7 @@ class EditProfileViewState extends State<EditProfileView> {
   late TextEditingController urlController;
   late TextEditingController autoUpdateDurationController;
   late bool autoUpdate;
-  late bool managed = widget.profile.managed;
+  late bool managed = widget.isNew ? true : widget.profile.managed;
   late bool useProxy = widget.profile.useProxy;
   late TextEditingController ageSecretKeyController;
   late TextEditingController userAgentController;

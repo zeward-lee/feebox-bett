@@ -209,6 +209,7 @@ class _TvQrImportDialogState extends State<TvQrImportDialog> {
       Navigator.of(context).pop();
       try {
         final profile = await Profile.normal(label: name)
+            .copyWith(managed: true)
             .saveFileWithString(content);
         await globalState.appController.addProfile(profile);
         globalState.appController.toProfiles();

@@ -751,6 +751,7 @@ class AppController {
     return _bundleLock.synchronized(() async {
       final profile = Profile.normal(label: label).copyWith(
         autoUpdate: false,
+        managed: true,
         usageStyle: usageStyle,
         bundle: ProfileBundle(members: members, collapsed: collapsed),
       );
@@ -2362,7 +2363,7 @@ class AppController {
       final profile = await Profile.normal(
         url: url,
         ageSecretKey: ageSecretKey,
-      ).update();
+      ).copyWith(managed: true).update();
       if (globalState.navigatorKey.currentState?.canPop() ?? false) {
         globalState.navigatorKey.currentState?.popUntil(
           (route) => route.isFirst,
@@ -2410,6 +2411,7 @@ class AppController {
           final bytes = await platformFile.readAsBytes();
           if (bytes.isEmpty) continue;
           final profile = await Profile.normal(label: platformFile.name)
+              .copyWith(managed: true)
               .saveFile(bytes);
           await addProfile(profile);
           successCount++;

@@ -161,7 +161,9 @@ class _MergeProfileViewState extends ConsumerState<MergeProfileView> {
       if (url == null) continue;
       final Profile imported;
       try {
-        imported = await Profile.normal(url: url).update();
+        imported = await Profile.normal(
+          url: url,
+        ).copyWith(managed: true).update();
       } on Object catch (e) {
         throw '$url\n${e.formatError}';
       }

@@ -256,7 +256,7 @@ const baseRuleProviders = {
 };
 
 const groupBaseOption = {
-  url: 'http://www.msftncsi.com/ncsi.txt',
+  url: 'https://www.gstatic.com/generate_204',
   'max-failed-times': 3,
   'empty-fallback': 'REJECT',
 };

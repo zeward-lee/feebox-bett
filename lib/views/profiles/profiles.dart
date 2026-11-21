@@ -232,12 +232,16 @@ class _ProfilesViewState extends ConsumerState<ProfilesView>
   Future<void> _updateProfiles() async {
     final profiles = globalState.config.profiles;
     final messages = <String>[];
+    Object? permissionError;
     final updateProfiles = profiles.map<Future<void>>((profile) async {
       if (profile.type != ProfileType.url) return;
       globalState.appController.setProfile(profile.copyWith(isUpdating: true));
       try {
         await globalState.appController.updateProfile(profile);
       } on Object catch (e) {
+        if (LocalNetworkPermission.isUnreachableError(e)) {
+          permissionError ??= e;
+        }
         messages.add('${profile.label ?? profile.id}: ${e.formatError}\n');
         globalState.appController.setProfile(
           profile.copyWith(isUpdating: false),
@@ -245,6 +249,12 @@ class _ProfilesViewState extends ConsumerState<ProfilesView>
       }
     });
     await Future.wait(updateProfiles);
+    // 局域网订阅超时多为 ACCESS_LOCAL_NETWORK 未授予，优先给出可操作的专属提示。
+    final timeoutError = permissionError;
+    if (timeoutError != null &&
+        await LocalNetworkPermission.notifyUpdateFailed(timeoutError)) {
+      return;
+    }
     if (messages.isNotEmpty) {
       unawaited(
         globalState.showMessage(
@@ -590,6 +600,7 @@ class ProfileItem extends StatelessWidget {
       await appController.updateProfile(profile);
     } on Object catch (e) {
       appController.setProfile(profile.copyWith(isUpdating: false));
+      if (await LocalNetworkPermission.notifyUpdateFailed(e)) return;
       unawaited(
         globalState.showMessage(
           title: appLocalizations.tip,

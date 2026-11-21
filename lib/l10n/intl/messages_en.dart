@@ -1283,6 +1283,24 @@ class MessageLookup extends MessageLookupByLibrary {
     "localBackupDesc": MessageLookupByLibrary.simpleMessage(
       "Backup data locally",
     ),
+    "localNetworkPermission": MessageLookupByLibrary.simpleMessage(
+      "Local network access",
+    ),
+    "localNetworkPermissionDesc": MessageLookupByLibrary.simpleMessage(
+      "Required on Android 16+ to reach devices on your local network (for example a LAN subscription URL). Without it, LAN requests keep timing out.",
+    ),
+    "localNetworkPermissionGranted": MessageLookupByLibrary.simpleMessage(
+      "Granted",
+    ),
+    "localNetworkPermissionDenied": MessageLookupByLibrary.simpleMessage(
+      "Not granted",
+    ),
+    "localNetworkPermissionOpenSettings": MessageLookupByLibrary.simpleMessage(
+      "Open settings",
+    ),
+    "localNetworkPermissionTip": MessageLookupByLibrary.simpleMessage(
+      "Local network access is not allowed, subscriptions cannot be updated",
+    ),
     "localFile": MessageLookupByLibrary.simpleMessage("Local File"),
     "localPing": MessageLookupByLibrary.simpleMessage("Local Ping"),
     "localPingAverage": MessageLookupByLibrary.simpleMessage("Average"),

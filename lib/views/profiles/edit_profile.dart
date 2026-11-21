@@ -122,11 +122,15 @@ class EditProfileViewState extends State<EditProfileView> {
         await appController.addProfile(updatedProfile);
       } on Object catch (e) {
         if (mounted) {
-          await globalState.showMessage(
-            title: appLocalizations.tip,
-            message: TextSpan(text: e.formatError),
-            cancelable: false,
-          );
+          final permissionTipShown =
+              await LocalNetworkPermission.notifyUpdateFailed(e);
+          if (!permissionTipShown) {
+            await globalState.showMessage(
+              title: appLocalizations.tip,
+              message: TextSpan(text: e.formatError),
+              cancelable: false,
+            );
+          }
         }
         return;
       } finally {
@@ -164,13 +168,15 @@ class EditProfileViewState extends State<EditProfileView> {
           await Future.delayed(commonDuration);
           await appController.updateProfile(profile);
         } on Object catch (e) {
-          await globalState.showMessage(
-            title: appLocalizations.tip,
-            message: TextSpan(
-              text: '${profile.label ?? profile.id}: ${e.formatError}',
-            ),
-            cancelable: false,
-          );
+          if (!await LocalNetworkPermission.notifyUpdateFailed(e)) {
+            await globalState.showMessage(
+              title: appLocalizations.tip,
+              message: TextSpan(
+                text: '${profile.label ?? profile.id}: ${e.formatError}',
+              ),
+              cancelable: false,
+            );
+          }
         }
       }
     }

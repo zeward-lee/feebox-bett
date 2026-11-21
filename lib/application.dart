@@ -252,6 +252,9 @@ class ApplicationState extends ConsumerState<Application>
     globalState.appController.initLink();
     if (system.isAndroid) {
       unawaited(app.initShortcuts());
+      // Android 16+ 需要 ACCESS_LOCAL_NETWORK 运行时权限才能访问局域网，
+      // 首次进入主界面后静默申请，不阻塞启动。
+      unawaited(LocalNetworkPermission.ensureOnStartup());
     }
   }
 

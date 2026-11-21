@@ -13,6 +13,7 @@ class App {
   void Function()? onInstallFailed;
   void Function(String action)? onHomeWidgetAction;
   void Function(bool active)? onHomeWidgetsChanged;
+  void Function(bool granted)? onLocalNetworkPermissionResult;
 
   App._internal() {
     methodChannel = const MethodChannel('app');
@@ -26,6 +27,8 @@ class App {
           onHomeWidgetAction?.call(call.arguments as String);
         case 'homeWidgetsChanged':
           onHomeWidgetsChanged?.call(call.arguments as bool);
+        case 'localNetworkPermissionResult':
+          onLocalNetworkPermissionResult?.call(call.arguments as bool);
         case 'getText':
           try {
             return Intl.message(call.arguments as String);
@@ -182,6 +185,52 @@ class App {
   Future<bool> isAndroidTV() async {
     final result = await methodChannel.invokeMethod<bool>('isAndroidTV');
     return result ?? false;
+  }
+
+  /// Android 16 (API 36) 起 ACCESS_LOCAL_NETWORK 才是运行时权限。
+  Future<bool> isLocalNetworkPermissionSupported() async {
+    if (!system.isAndroid) return false;
+    try {
+      return await methodChannel.invokeMethod<bool>(
+            'isLocalNetworkPermissionSupported',
+          ) ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  Future<bool> hasLocalNetworkPermission() async {
+    if (!system.isAndroid) return true;
+    try {
+      return await methodChannel.invokeMethod<bool>(
+            'hasLocalNetworkPermission',
+          ) ??
+          true;
+    } on PlatformException {
+      return true;
+    } on MissingPluginException {
+      return true;
+    }
+  }
+
+  /// [force] 为 true 时忽略"此前已询问过"的本地标记（用于设置页手动授权）。
+  /// 返回 true 表示已授权或系统授权框已弹出。
+  Future<bool> requestLocalNetworkPermission({bool force = false}) async {
+    if (!system.isAndroid) return true;
+    try {
+      return await methodChannel.invokeMethod<bool>(
+            'requestLocalNetworkPermission',
+            {'force': force},
+          ) ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
   }
 }
 

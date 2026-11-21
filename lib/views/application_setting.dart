@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:bett_box/common/common.dart';
 import 'package:bett_box/enum/enum.dart';
+import 'package:bett_box/plugins/app.dart';
 import 'package:bett_box/providers/config.dart';
 import 'package:bett_box/state.dart';
 import 'package:bett_box/widgets/widgets.dart';
@@ -619,6 +622,107 @@ class AutoDownloadUpdateItem extends ConsumerWidget {
   }
 }
 
+/// Android 16 (API 36) 起 `ACCESS_LOCAL_NETWORK` 为运行时权限。被用户拒绝后
+/// 系统可能不再弹授权框（USER_SENSITIVE_WHEN_DENIED），这里提供状态展示和
+/// 跳转系统应用详情页的手动授权入口。
+class LocalNetworkPermissionItem extends ConsumerStatefulWidget {
+  const LocalNetworkPermissionItem({super.key});
+
+  @override
+  ConsumerState<LocalNetworkPermissionItem> createState() =>
+      _LocalNetworkPermissionItemState();
+}
+
+class _LocalNetworkPermissionItemState
+    extends ConsumerState<LocalNetworkPermissionItem>
+    with WidgetsBindingObserver {
+  bool _supported = false;
+  bool _granted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    app.onLocalNetworkPermissionResult = _handlePermissionResult;
+    unawaited(_refresh());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (app.onLocalNetworkPermissionResult == _handlePermissionResult) {
+      app.onLocalNetworkPermissionResult = null;
+    }
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refresh());
+    }
+  }
+
+  Future<void> _refresh() async {
+    final supported = await LocalNetworkPermission.isSupported();
+    if (!mounted) return;
+    var granted = false;
+    if (supported) {
+      granted = await LocalNetworkPermission.isGranted();
+      if (!mounted) return;
+    }
+    setState(() {
+      _supported = supported;
+      _granted = granted;
+    });
+  }
+
+  void _handlePermissionResult(bool granted) {
+    if (!mounted) return;
+    setState(() => _granted = granted);
+    if (!granted) unawaited(_showSettingsHint());
+  }
+
+  Future<void> _showSettingsHint() async {
+    final goSettings = await globalState.showMessage(
+      title: appLocalizations.tip,
+      message: TextSpan(text: appLocalizations.localNetworkPermissionDesc),
+      confirmText: appLocalizations.localNetworkPermissionOpenSettings,
+      cancelText: appLocalizations.cancel,
+    );
+    if (goSettings == true) await app.openAppSettings();
+  }
+
+  Future<void> _onTap() async {
+    if (_granted) {
+      // 已授权时直接打开系统应用详情页，方便用户随时收回权限。
+      await app.openAppSettings();
+      return;
+    }
+    final requested = await LocalNetworkPermission.request(force: true);
+    if (!requested && mounted) await _showSettingsHint();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_supported) return const SizedBox.shrink();
+    return ListItem(
+      title: Text(appLocalizations.localNetworkPermission),
+      subtitle: Text(appLocalizations.localNetworkPermissionDesc),
+      leading: const AppIcon(Icons.lan_outlined),
+      trailing: Icon(
+        _granted
+            ? Icons.check_circle_outline
+            : Icons.warning_amber_rounded,
+        color: _granted
+            ? context.colorScheme.primary
+            : context.colorScheme.error,
+      ),
+      onTap: _onTap,
+    );
+  }
+}
+
 class ApplicationSettingView extends ConsumerWidget {
   const ApplicationSettingView({super.key});
 
@@ -631,7 +735,11 @@ class ApplicationSettingView extends ConsumerWidget {
       AutoLaunchItem(),
       if (system.isDesktop) ...[SilentLaunchItem()],
       AutoRunItem(),
-      if (system.isAndroid) ...[HiddenItem()],
+      if (system.isAndroid) ...[
+        HiddenItem(),
+        // Android 16+ 局域网访问权限的自救入口（被拒绝后系统不再弹窗）。
+        const LocalNetworkPermissionItem(),
+      ],
       if (system.isDesktop) ...[
         if (system.isWindows || system.isLinux) const AlwaysShowTitleBarItem(),
       ],

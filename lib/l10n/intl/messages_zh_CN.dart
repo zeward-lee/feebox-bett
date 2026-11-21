@@ -959,6 +959,18 @@ class MessageLookup extends MessageLookupByLibrary {
     "list": MessageLookupByLibrary.simpleMessage("列表"),
     "local": MessageLookupByLibrary.simpleMessage("本地"),
     "localBackupDesc": MessageLookupByLibrary.simpleMessage("备份数据到本地"),
+    "localNetworkPermission": MessageLookupByLibrary.simpleMessage("本地网络访问"),
+    "localNetworkPermissionDesc": MessageLookupByLibrary.simpleMessage(
+      "Android 16 及以上访问局域网设备（如局域网订阅地址）需要此权限，未授权时局域网请求会一直超时。",
+    ),
+    "localNetworkPermissionGranted": MessageLookupByLibrary.simpleMessage("已授权"),
+    "localNetworkPermissionDenied": MessageLookupByLibrary.simpleMessage("未授权"),
+    "localNetworkPermissionOpenSettings": MessageLookupByLibrary.simpleMessage(
+      "去设置",
+    ),
+    "localNetworkPermissionTip": MessageLookupByLibrary.simpleMessage(
+      "系统未允许访问局域网，订阅无法更新",
+    ),
     "localFile": MessageLookupByLibrary.simpleMessage("本地文件"),
     "localPing": MessageLookupByLibrary.simpleMessage("本地 Ping"),
     "localPingAverage": MessageLookupByLibrary.simpleMessage("平均延迟"),

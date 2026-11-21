@@ -434,9 +434,19 @@ class Request {
         options: Options(
           followRedirects: false,
           validateStatus: (status) =>
-              status != null && status >= 300 && status < 400,
+              status != null &&
+              (status == 403 ||
+                  status == 404 ||
+                  (status >= 300 && status < 400)),
         ),
       );
+      final status = response.statusCode ?? 0;
+      // 私有仓库 / 尚未发布 release：GitHub 返回 404（部分场景 403）。
+      // 这不是错误，只是“暂时没有可用的更新”，静默按无更新处理。
+      if (status == 403 || status == 404) {
+        commonPrint.debug('Check update skipped: status $status');
+        return null;
+      }
       final location = response.headers['location']?.firstOrNull;
       if (location != null && location.contains('/releases/tag/')) {
         final remoteVersion = location.split('/').last.trim();

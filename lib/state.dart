@@ -681,6 +681,42 @@ class GlobalState {
       await preferences.saveConfig(config);
       this.config = config;
     }
+
+    await _migrateFindProcessMode(config);
+  }
+
+  /// 一次性迁移：旧版本默认 find-process-mode 为 always（常驻进程扫描）。
+  /// 我们不用 PROCESS 规则，改为 strict 省电；只迁移存量的 always。
+  Future<void> _migrateFindProcessMode(Config config) async {
+    final prefs = await preferences.sharedPreferencesCompleter.future;
+    // 只跑一次的判据就在这一行：SharedPreferences 的
+    // findProcessModeMigratedKey 一旦为 true 即永久跳过，
+    // 用户之后手动改回 always 不会被再次覆盖。
+    final alreadyMigrated =
+        prefs?.getBool(findProcessModeMigratedKey) ?? false;
+    if (prefs == null || alreadyMigrated) {
+      return;
+    }
+    try {
+      final patch = config.patchClashConfig;
+      if (patch.findProcessMode == FindProcessMode.always) {
+        final migrated = config.copyWith(
+          patchClashConfig: patch.copyWith(
+            findProcessMode: FindProcessMode.strict,
+          ),
+        );
+        this.config = migrated;
+        if (!await preferences.saveConfig(migrated)) {
+          // 落盘失败就不写标记，下次启动重试
+          commonPrint.warn('Failed to persist find-process-mode migration');
+          return;
+        }
+        commonPrint.debug('Migrated find-process-mode: always -> strict');
+      }
+      await prefs.setBool(findProcessModeMigratedKey, true);
+    } catch (e) {
+      commonPrint.warn('Failed to migrate find-process-mode: $e');
+    }
   }
 
   CoreState getCoreState() {

@@ -749,3 +749,37 @@ rules:
 		t.Fatalf("rules without fallback = %v", rawCfg.Rule)
 	}
 }
+
+func TestPatchProxyGroupsHealthCheckTimeoutFloor(t *testing.T) {
+	cases := []struct {
+		name     string
+		value    int
+		want     any
+		hasValue bool
+	}{
+		{"below floor is clamped", 1000, minHealthCheckTimeout, true},
+		{"at floor is kept", minHealthCheckTimeout, minHealthCheckTimeout, true},
+		{"above default is kept", 8000, 8000, true},
+		{"unset zero is not injected", 0, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rawCfg := parsePatchProfile(t, `
+proxy-groups:
+  - {name: Proxy, type: select, proxies: [DIRECT]}
+`)
+			params := &PatchParams{HealthCheckTimeout: tc.value}
+			patchProxyGroups(rawCfg, params)
+			got, exist := rawCfg.ProxyGroup[0]["timeout"]
+			if !tc.hasValue {
+				if exist {
+					t.Fatalf("timeout injected for unset value: %v", got)
+				}
+				return
+			}
+			if !exist || got != tc.want {
+				t.Fatalf("timeout = %v (exist %v), want %v", got, exist, tc.want)
+			}
+		})
+	}
+}

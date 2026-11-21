@@ -53,6 +53,21 @@ type PatchParams struct {
 
 const defaultHealthCheckTimeout = 5000
 
+// minHealthCheckTimeout guards against a too-small value being injected into
+// every group: cross-border nodes need more than one RTT to answer a 204
+// health check, and a 1s timeout marks healthy nodes as dead.
+const minHealthCheckTimeout = 3000
+
+// effectiveHealthCheckTimeout clamps an explicitly configured timeout to the
+// minimum sane value. Zero (field missing) is returned unchanged so callers can
+// tell "unset" apart from a real setting and skip injection entirely.
+func effectiveHealthCheckTimeout(value int) int {
+	if value > 0 && value < minHealthCheckTimeout {
+		return minHealthCheckTimeout
+	}
+	return value
+}
+
 var patchForAndroid = runtime.GOOS == "android"
 
 var protectedProxyNames = []string{"DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS"}
@@ -360,7 +375,8 @@ func combineExcludeFilter(target map[string]any, filter string) {
 
 func patchProxyGroups(raw *config.RawConfig, params *PatchParams) {
 	filter := params.NodeExcludeFilter
-	if raw.ProxyGroup != nil && (filter != "" || params.HealthCheckTimeout != defaultHealthCheckTimeout) {
+	healthCheckTimeout := effectiveHealthCheckTimeout(params.HealthCheckTimeout)
+	if raw.ProxyGroup != nil && (filter != "" || (healthCheckTimeout > 0 && healthCheckTimeout != defaultHealthCheckTimeout)) {
 		var filterRegex *regexp2.Regexp
 		if filter != "" {
 			filterRegex, _ = utils.CompileRegexp(filter, regexp2.ECMAScript)
@@ -427,9 +443,9 @@ func patchProxyGroups(raw *config.RawConfig, params *PatchParams) {
 				}
 				group["proxies"] = filtered
 			}
-			if params.HealthCheckTimeout != defaultHealthCheckTimeout {
-				if timeout, exist := group["timeout"]; !exist || timeout == nil {
-					group["timeout"] = params.HealthCheckTimeout
+			if healthCheckTimeout > 0 && healthCheckTimeout != defaultHealthCheckTimeout {
+				if existing, exist := group["timeout"]; !exist || existing == nil {
+					group["timeout"] = healthCheckTimeout
 				}
 			}
 		}

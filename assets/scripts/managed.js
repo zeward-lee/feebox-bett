@@ -78,7 +78,16 @@ const iconBaseUrl = 'https://cdn.jsdelivr.net/gh/appshubcc/Qure_Style_SVG@main/i
 // 避免移动端在 VPN/代理下被取消（context canceled）导致配置导入失败；外出场景首次拉取会失败，
 // mihomo 会缓存已下载的 ruleset，之后离线可用。
 const ruleSetBaseUrl = 'http://192.168.2.1/sub/rules/';
-const directTestUrl = 'http://dns.alidns.com';
+
+// 健康检查地址（2026-11-21 统一为两个常量）
+// 代理组（请求经节点出境）：cp.cloudflare.com 为 mihomo 官方推荐，根路径返回 204；
+// 实测与 gstatic/apple 走节点延迟等价（差 ≤3ms），且不属于 Google 域名体系。
+const groupTestUrl = 'https://cp.cloudflare.com';
+// DIRECT 组（本机直连）：vivo generate_204 直连 4 次采样 10/11/11/11ms 稳定返回 204；
+// gstatic 直连 5 次采样中有 1 次 Timeout，connectivitycheck.gstatic.com 抖到 471ms，google 全超时。
+const directTestUrl = 'http://wifi.vivo.com.cn/generate_204';
+// expected-status 留空 = 内核不校验状态码，等于放弃识别「强制门户/运营商劫持返回 200 登录页」，必须显式写 204。
+const testExpectedStatus = '204';
 
 const regionDefinitions = [
   {
@@ -256,7 +265,8 @@ const baseRuleProviders = {
 };
 
 const groupBaseOption = {
-  url: 'https://www.gstatic.com/generate_204',
+  url: groupTestUrl,
+  'expected-status': testExpectedStatus,
   'max-failed-times': 3,
   'empty-fallback': 'REJECT',
 };
@@ -1085,6 +1095,7 @@ function buildFunctionalGroups(filteredProxies, generatedRegionGroups) {
       ...selectBaseOption,
       name: '直连',
       url: directTestUrl,
+      'expected-status': testExpectedStatus,
       'default-selected': '🇨🇳 直连 | IPv4优先',
       proxies: directProxies.map((p) => p.name),
       icon: `${iconBaseUrl}flag/China.svg`,
@@ -1165,6 +1176,7 @@ function buildFunctionalGroups(filteredProxies, generatedRegionGroups) {
     ...selectBaseOption,
     name: '直连',
     url: directTestUrl,
+    'expected-status': testExpectedStatus,
     'default-selected': '🇨🇳 直连 | IPv4优先',
     proxies: directProxies.map((p) => p.name),
     icon: `${iconBaseUrl}flag/China.svg`,

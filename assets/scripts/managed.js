@@ -881,6 +881,11 @@ function createRegionGroup(name, icon, proxies, userNodes) {
         ...region,
         ...regionNodes,
         proxies,
+        // 跨境链路 5ms 抖动就重排会导致出口 IP 频繁跳动
+        tolerance: 50,
+        interval: 600,
+        // 首次连接不等健康检查完成
+        lazy: false,
         hidden: hideManualSelectGroupEnabled,
       },
     ];
@@ -1081,6 +1086,8 @@ function buildFunctionalGroups(filteredProxies, generatedRegionGroups) {
       ...selectBaseOption,
       name: '默认代理',
       proxies: [...allProxiesNames, ...(autoSelectGroupEnabled ? ['自动选择'] : [])],
+      // 首次连接不等健康检查完成
+      lazy: false,
       icon: `${iconBaseUrl}common/Proxy.svg`,
     };
 
@@ -1121,6 +1128,8 @@ function buildFunctionalGroups(filteredProxies, generatedRegionGroups) {
     ...selectBaseOption,
     name: '默认代理',
     proxies: [...groupNamesOfSelect, ...baseGroupNames],
+    // 首次连接不等健康检查完成
+    lazy: false,
     icon: `${iconBaseUrl}common/Proxy.svg`,
   });
 
@@ -1731,7 +1740,13 @@ function buildDnsAndHostsConfig(config, filteredProxies, dnsPolicyGroups) {
     'default-nameserver': defaultDNS,
     'enhanced-mode': 'fake-ip',
     'fake-ip-filter': [
+      // '*' 只匹配不含点的单段主机名（如 nas / router），不是「全部域名」，必须保留
       '*',
+      // 多段内网域名不能只靠 rule-set：冷启动时 provider 尚未就绪，rule-set:private 可能为空
+      '+.lan',
+      '+.local',
+      '+.home',
+      '+.internal',
       'rule-set:cn',
       'rule-set:private',
       'rule-set:fakeip_filter',
@@ -1810,7 +1825,10 @@ function main(config) {
 
   newConfig.proxies = [...mappedProxies, ...directProxies];
   newConfig['proxy-groups'] = orderedGroups;
-  newConfig['rule-providers'] = finalRuleProviders;
+  // 所有 rule-provider 显式指定直连下载，避免规则集订阅被代理链路拖慢/污染
+  newConfig['rule-providers'] = Object.fromEntries(
+    Object.entries(finalRuleProviders).map(([name, provider]) => [name, { ...provider, proxy: 'DIRECT' }]),
+  );
 
   newConfig.rules = [
     ...prefixRules,
